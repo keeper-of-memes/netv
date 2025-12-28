@@ -188,7 +188,7 @@ x265, AV1).
 
 ## Q&A
 
-**Where can I get IPTV?**
+**Where can I get free IPTV?**
 
 Check out [iptv-org/iptv](https://github.com/iptv-org/iptv) -- a community-maintained
 collection of publicly available IPTV channels from around the world.
