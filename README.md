@@ -2,6 +2,12 @@
 
 A minimal, self-hosted web interface for IPTV streams.
 
+![EPG Guide](screenshots/epg.png)
+
+![Player](screenshots/player.png)
+
+![Settings](screenshots/settings.png)
+
 ## Why This Exists
 
 We built neTV because we couldn't find a clean, lightweight interface for
