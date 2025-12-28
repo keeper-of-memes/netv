@@ -195,12 +195,14 @@ collection of publicly available IPTV channels from around the world.
 
 **Where can I get TV guide data?**
 
-The default choice is [iptv-org/epg](https://github.com/iptv-org/epg), but this didn't
-work reliably for me. I've had consistent success with `tools/zap2xml.py` for over a
-year -- it scrapes guide data from zap2it/gracenote.
+The free choice is [iptv-org/epg](https://github.com/iptv-org/epg), but this
+has never worked reliably for me.
 
 For a more robust solution, consider [Schedules Direct](https://schedulesdirect.org/) --
 your membership helps fund Open Source projects.
+
+Alternatively you can use `tools/zap2xml.py`. I've used this for over a year
+and found it to be very reliable -- it scrapes guide data from zap2it/gracenote.
 
 **How do I set up HDHomeRun?**
 
