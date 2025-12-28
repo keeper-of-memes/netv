@@ -58,14 +58,16 @@ through their IPTV providers.
 git clone https://github.com/jvdillon/netv.git
 cd netv
 chmod +x main.py
-./main.py
+./main.py --port 8000
 ```
 
 Open `http://localhost:8000`, create an admin account, and add your IPTV source.
 
-## Installation (Production)
+## Installation
 
-For a production server with HTTPS and auto-start:
+### Debian/Ubuntu
+
+For peak FFMPEG performance, Chromecast (requires HTTPS), and auto-start:
 
 ```bash
 # 1. Install prerequisites (uv, Python)
@@ -81,7 +83,7 @@ For a production server with HTTPS and auto-start:
 sudo ./tools/install-netv.sh
 ```
 
-The service runs on port 8000 with HTTPS. Manage with:
+Manage with:
 
 ```bash
 sudo systemctl status netv      # Check status
