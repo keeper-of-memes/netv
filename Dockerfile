@@ -36,8 +36,13 @@ RUN apt-get update && apt-get install -y \
     libass-dev \
     libdav1d-dev \
     libfdk-aac-dev \
+    libfontconfig1-dev \
     libfreetype6-dev \
+    libsoxr-dev \
+    libsrt-openssl-dev \
     libssl-dev \
+    libwebp-dev \
+    libzimg-dev \
     liblzma-dev \
     libmp3lame-dev \
     libnuma-dev \
@@ -98,7 +103,7 @@ RUN wget -O ffmpeg-snapshot.tar.bz2 https://ffmpeg.org/releases/ffmpeg-snapshot.
         --prefix=$FFMPEG_BUILD \
         --bindir=/opt/bin \
         --pkg-config-flags="--static" \
-        --extra-cflags="-I$FFMPEG_BUILD/include -O3" \
+        --extra-cflags="-I$FFMPEG_BUILD/include -O3 -march=native -mtune=native" \
         --extra-ldflags="-L$FFMPEG_BUILD/lib -s" \
         --extra-libs="-lpthread -lm" \
         --ld="g++" \
@@ -108,6 +113,7 @@ RUN wget -O ffmpeg-snapshot.tar.bz2 https://ffmpeg.org/releases/ffmpeg-snapshot.
         --enable-libaom \
         --enable-libass \
         --enable-libfdk-aac \
+        --enable-libfontconfig \
         --enable-libfreetype \
         --enable-libmp3lame \
         --enable-libopus \
@@ -116,8 +122,12 @@ RUN wget -O ffmpeg-snapshot.tar.bz2 https://ffmpeg.org/releases/ffmpeg-snapshot.
         --enable-libvmaf \
         --enable-libvorbis \
         --enable-libvpx \
+        --enable-libwebp \
         --enable-libx264 \
         --enable-libx265 \
+        --enable-libzimg \
+        --enable-libsoxr \
+        --enable-libsrt \
         --enable-vaapi \
         --enable-nvenc \
         --enable-nonfree && \
@@ -138,8 +148,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libass9 \
     libdav1d7 \
     libfdk-aac2 \
+    libfontconfig1 \
     libfreetype6 \
+    libsoxr0 \
+    libsrt1.5-openssl \
     libssl3 \
+    libwebp7 \
+    libzimg2 \
     libmp3lame0 \
     libnuma1 \
     libopus0 \
