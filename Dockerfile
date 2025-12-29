@@ -16,7 +16,7 @@ FROM ubuntu:24.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV FFMPEG_BUILD=/opt/ffmpeg_build
-ENV PATH="/opt/bin:$PATH"
+ENV PATH="/opt/bin:/usr/local/cuda/bin:$PATH"
 
 # Add CUDA repo and install build dependencies
 RUN apt-get update && apt-get install -y wget gnupg && \
@@ -24,7 +24,6 @@ RUN apt-get update && apt-get install -y wget gnupg && \
     dpkg -i cuda-keyring_1.1-1_all.deb && \
     rm cuda-keyring_1.1-1_all.deb && \
     apt-get update && \
-    CUDA_VERSION=$(apt-cache search '^cuda-nvcc-[0-9]' | sed 's/cuda-nvcc-//' | cut -d' ' -f1 | sort -V | tail -1) && \
     apt-get install -y \
     autoconf \
     automake \
@@ -67,9 +66,15 @@ RUN apt-get update && apt-get install -y wget gnupg && \
     libxcb-xfixes0-dev \
     libxcb1-dev \
     zlib1g-dev \
-    cuda-nvcc-$CUDA_VERSION \
-    cuda-cudart-dev-$CUDA_VERSION \
     && rm -rf /var/lib/apt/lists/*
+
+# Install CUDA (separate step for dynamic version detection)
+RUN apt-get update && \
+    CUDA_VERSION=$(apt-cache search '^cuda-nvcc-[0-9]' | sed 's/cuda-nvcc-//' | cut -d' ' -f1 | sort -V | tail -1) && \
+    echo "Installing CUDA version: $CUDA_VERSION" && \
+    apt-get install -y cuda-nvcc-$CUDA_VERSION cuda-cudart-dev-$CUDA_VERSION && \
+    ln -s /usr/local/cuda-* /usr/local/cuda && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
 
