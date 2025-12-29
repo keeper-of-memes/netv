@@ -338,6 +338,50 @@
     </div>
   </div>
 
+  <!-- User-Agent -->
+  <div id="user-agent" class="mb-8 p-4 bg-gray-800 rounded">
+    <h3 class="text-xl font-semibold mb-4">User-Agent</h3>
+    <p class="text-sm text-gray-400 mb-4">HTTP User-Agent header sent when fetching streams. Some providers filter based on this.</p>
+    <div class="space-y-4" id="user-agent-settings">
+      <div class="space-y-2">
+        <label class="flex items-center gap-3 cursor-pointer">
+          <input type="radio" name="user_agent_preset" value="default" {% if user_agent_preset == 'default' %}checked{% endif %}
+                 class="setting-input w-4 h-4 bg-gray-700 border-gray-600 text-blue-500 focus:ring-blue-500">
+          <span>FFmpeg</span>
+          <span class="text-xs text-gray-500 font-mono">Lavf/...</span>
+        </label>
+        <label class="flex items-center gap-3 cursor-pointer">
+          <input type="radio" name="user_agent_preset" value="vlc" {% if user_agent_preset == 'vlc' %}checked{% endif %}
+                 class="setting-input w-4 h-4 bg-gray-700 border-gray-600 text-blue-500 focus:ring-blue-500">
+          <span>VLC</span>
+          <span class="text-xs text-gray-500 font-mono">VLC/3.0.20 LibVLC/3.0.20</span>
+        </label>
+        <label class="flex items-center gap-3 cursor-pointer">
+          <input type="radio" name="user_agent_preset" value="chrome" {% if user_agent_preset == 'chrome' %}checked{% endif %}
+                 class="setting-input w-4 h-4 bg-gray-700 border-gray-600 text-blue-500 focus:ring-blue-500">
+          <span>Chrome</span>
+          <span class="text-xs text-gray-500 font-mono truncate max-w-xs">Mozilla/5.0 ... Chrome/...</span>
+        </label>
+        <label class="flex items-center gap-3 cursor-pointer">
+          <input type="radio" name="user_agent_preset" value="tivimate" {% if user_agent_preset == 'tivimate' %}checked{% endif %}
+                 class="setting-input w-4 h-4 bg-gray-700 border-gray-600 text-blue-500 focus:ring-blue-500">
+          <span>TiviMate</span>
+          <span class="text-xs text-gray-500 font-mono">TiviMate/4.7.0</span>
+        </label>
+        <label class="flex items-center gap-3 cursor-pointer">
+          <input type="radio" name="user_agent_preset" value="custom" {% if user_agent_preset == 'custom' %}checked{% endif %}
+                 class="setting-input w-4 h-4 bg-gray-700 border-gray-600 text-blue-500 focus:ring-blue-500">
+          <span>Custom</span>
+        </label>
+      </div>
+      <div id="custom-user-agent-container" class="{% if user_agent_preset != 'custom' %}hidden{% endif %}">
+        <input type="text" name="user_agent_custom" value="{{ user_agent_custom }}"
+               placeholder="Enter custom user-agent string"
+               class="setting-input w-full p-2 bg-gray-700 border border-gray-600 rounded focus:border-blue-500 focus:outline-none font-mono text-sm">
+      </div>
+    </div>
+  </div>
+
   <!-- Probe Cache -->
   <div id="probe-cache" class="mb-8 p-4 bg-gray-800 rounded">
     <div class="flex items-center justify-between mb-4">

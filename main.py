@@ -1517,6 +1517,8 @@ async def settings_page(request: Request, user: Annotated[dict, Depends(require_
             "vod_transcode_cache_mins": server_settings.get("vod_transcode_cache_mins", 60),
             "probe_movies": server_settings.get("probe_movies", True),
             "probe_series": server_settings.get("probe_series", False),
+            "user_agent_preset": server_settings.get("user_agent_preset", "default"),
+            "user_agent_custom": server_settings.get("user_agent_custom", ""),
             "available_encoders": AVAILABLE_ENCODERS,
             "all_users": auth.get_users_with_admin(),
             "current_user": username,
@@ -1929,6 +1931,22 @@ async def settings_transcode(
     settings["vod_transcode_cache_mins"] = max(0, vod_transcode_cache_mins)
     settings["probe_movies"] = probe_movies == "on"
     settings["probe_series"] = probe_series == "on"
+    save_server_settings(settings)
+    return {"ok": True}
+
+
+@app.post("/settings/user-agent")
+async def settings_user_agent(
+    _user: Annotated[dict, Depends(require_admin)],
+    preset: Annotated[str, Form()],
+    custom: Annotated[str, Form()] = "",
+):
+    valid_presets = {"default", "vlc", "chrome", "tivimate", "custom"}
+    if preset not in valid_presets:
+        preset = "default"
+    settings = load_server_settings()
+    settings["user_agent_preset"] = preset
+    settings["user_agent_custom"] = custom
     save_server_settings(settings)
     return {"ok": True}
 

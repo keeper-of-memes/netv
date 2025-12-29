@@ -200,6 +200,8 @@ def load_server_settings() -> dict[str, Any]:
     data.setdefault("probe_series", False)
     data.setdefault("sources", [])
     data.setdefault("users", {})
+    data.setdefault("user_agent_preset", "tivimate")
+    data.setdefault("user_agent_custom", "")
     return data
 
 

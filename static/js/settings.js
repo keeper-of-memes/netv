@@ -327,6 +327,41 @@
   }
 
   // ============================================================
+  // User-Agent Settings
+  // ============================================================
+
+  function setupUserAgentSettings() {
+    const container = document.getElementById('user-agent-settings');
+    if (!container) return;
+
+    const customContainer = document.getElementById('custom-user-agent-container');
+    const presetRadios = container.querySelectorAll('input[name="user_agent_preset"]');
+    const customInput = container.querySelector('input[name="user_agent_custom"]');
+
+    function saveSettings() {
+      const form = new FormData();
+      form.append('preset', container.querySelector('input[name="user_agent_preset"]:checked')?.value || 'default');
+      form.append('custom', customInput?.value || '');
+      fetch('/settings/user-agent', { method: 'POST', body: form });
+    }
+
+    // Toggle custom input visibility
+    presetRadios.forEach(radio => {
+      radio.addEventListener('change', () => {
+        if (radio.value === 'custom') {
+          customContainer?.classList.remove('hidden');
+        } else {
+          customContainer?.classList.add('hidden');
+        }
+        saveSettings();
+      });
+    });
+
+    // Save when custom input changes
+    customInput?.addEventListener('change', saveSettings);
+  }
+
+  // ============================================================
   // Probe Cache Management
   // ============================================================
 
@@ -576,6 +611,7 @@
     setupCaptionLang();
     setupCaptionsEnabled();
     setupTranscodeSettings();
+    setupUserAgentSettings();
     setupProbeCache();
     setupRefreshButtons();
     setupUserForms();

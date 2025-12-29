@@ -71,6 +71,24 @@ _series_probe_cache: dict[int, dict[str, Any]] = {}
 _CACHE_DIR = pathlib.Path(__file__).parent / "cache"
 _SERIES_PROBE_CACHE_FILE = _CACHE_DIR / "series_probe_cache.json"
 
+# User-Agent presets
+_USER_AGENT_PRESETS = {
+    "vlc": "VLC/3.0.20 LibVLC/3.0.20",
+    "chrome": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "tivimate": "TiviMate/4.7.0",
+}
+
+
+def get_user_agent() -> str | None:
+    """Get user-agent string from settings, or None to use FFmpeg default."""
+    settings = _load_settings()
+    preset = settings.get("user_agent_preset", "default")
+    if preset == "default":
+        return None
+    if preset == "custom":
+        return settings.get("user_agent_custom") or None
+    return _USER_AGENT_PRESETS.get(preset)
+
 
 def _get_gpu_nvdec_codecs() -> set[str]:
     """Get supported NVDEC codecs, probing GPU on first call."""
@@ -386,8 +404,11 @@ def probe_media(
             "json",
             "-show_streams",
             "-show_format",
-            url,
         ]
+        user_agent = get_user_agent()
+        if user_agent:
+            cmd.extend(["-user_agent", user_agent])
+        cmd.append(url)
         log.info("Probing: %s", " ".join(cmd))
         result = subprocess.run(
             cmd,
@@ -703,6 +724,7 @@ def build_hls_ffmpeg_cmd(
     media_info: MediaInfo | None = None,
     max_resolution: str = "1080p",
     max_bitrate_mbps: float = 0,
+    user_agent: str | None = None,
 ) -> list[str]:
     # Check if we need to scale down
     max_h = _MAX_RES_HEIGHT.get(max_resolution, 9999)
@@ -766,21 +788,22 @@ def build_hls_ffmpeg_cmd(
                 "500000" if is_vod else "5000000",
             ]
         )
-    cmd.extend(
-        [
-            "-fflags",
-            "+discardcorrupt+genpts",
-            "-err_detect",
-            "ignore_err",
-            "-reconnect",
-            "1",
-            "-reconnect_streamed",
-            "1",
-            "-reconnect_delay_max",
-            "2",
-            "-i",
-            input_url,
-        ]
+    input_opts = [
+        "-fflags",
+        "+discardcorrupt+genpts",
+        "-err_detect",
+        "ignore_err",
+        "-reconnect",
+        "1",
+        "-reconnect_streamed",
+        "1",
+        "-reconnect_delay_max",
+        "2",
+    ]
+    if user_agent:
+        input_opts.extend(["-user_agent", user_agent])
+    input_opts.extend(["-i", input_url])
+    cmd.extend(input_opts
     )
 
     for i, sub in enumerate(subtitles or []):
@@ -1232,7 +1255,8 @@ async def _handle_existing_vod_session(
 
     media_info = probe_media(url)[0] if do_probe else None
     cmd = build_hls_ffmpeg_cmd(
-        url, hw, snap.output_dir, True, None, media_info, max_resolution, max_bitrate_mbps
+        url, hw, snap.output_dir, True, None, media_info, max_resolution, max_bitrate_mbps,
+        get_user_agent()
     )
 
     i_idx = cmd.index("-i")
@@ -1347,7 +1371,8 @@ async def _do_start_transcode(
             )
 
     cmd = build_hls_ffmpeg_cmd(
-        url, hw, output_dir, is_vod, subtitles, media_info, max_resolution, max_bitrate_mbps
+        url, hw, output_dir, is_vod, subtitles, media_info, max_resolution, max_bitrate_mbps,
+        get_user_agent()
     )
     if old_seek_offset > 0:
         i_idx = cmd.index("-i")
@@ -1622,6 +1647,7 @@ async def seek_transcode(session_id: str, seek_time: float) -> dict[str, Any]:
         media_info,
         max_resolution,
         max_bitrate_mbps,
+        get_user_agent(),
     )
     i_idx = cmd.index("-i")
     cmd.insert(i_idx, str(seek_time))
