@@ -38,7 +38,7 @@ RUN apt-get update && apt-get install -y \
     libdav1d-dev \
     libfdk-aac-dev \
     libfreetype6-dev \
-    libgnutls28-dev \
+    libssl-dev \
     liblzma-dev \
     libmp3lame-dev \
     libnuma-dev \
@@ -105,7 +105,7 @@ RUN wget -O ffmpeg-snapshot.tar.bz2 https://ffmpeg.org/releases/ffmpeg-snapshot.
         --ld="g++" \
         --enable-gpl \
         --enable-version3 \
-        --enable-gnutls \
+        --enable-openssl \
         --enable-libaom \
         --enable-libass \
         --enable-libfdk-aac \
@@ -140,7 +140,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libdav1d7 \
     libfdk-aac2 \
     libfreetype6 \
-    libgnutls30 \
+    libssl3 \
     libmp3lame0 \
     libnuma1 \
     libopus0 \
