@@ -26,14 +26,13 @@ services:
     restart: unless-stopped
 
     # --- Hardware Acceleration ---
-    # Uncomment ONE of the following based on your hardware:
-
-    # VAAPI (Intel/AMD GPU)
-    # devices:
-    #   - /dev/dri:/dev/dri
-    # group_add:
-    #   - video
-    #   - render
+    # VAAPI enabled by default (Intel/AMD GPU)
+    # Comment both devices and group_add if /dev/dri doesn't exist on your system
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - render
 
   # NVIDIA GPU (use: docker compose --profile nvidia up -d)
   netv-nvidia:
