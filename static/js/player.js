@@ -26,6 +26,7 @@
   let progressPollTimerId = null;
   let lastSavedPosition = 0;
   let savePositionTimeout = null;
+  let autoMutedByPolicy = false;
 
   // ============================================================
   // Utilities
@@ -592,7 +593,7 @@
         if (video.textTracks.length === 0) disableCcButton();
         applyCaptionsSetting();
         restorePosition();
-        video.play().catch(() => { video.muted = true; video.play(); });
+        video.play().catch(() => { if (!video.muted) { autoMutedByPolicy = true; video.muted = true; } video.play(); });
       }, { once: true });
       video.addEventListener('error', function() {
         if (onError) onError();
@@ -662,7 +663,7 @@
       }
       if (transcodeSessionId && isVodUrl) startProgressPolling();
       restorePosition();
-      video.play().catch(() => { video.muted = true; video.play(); });
+      video.play().catch(() => { if (!video.muted) { autoMutedByPolicy = true; video.muted = true; } video.play(); });
       setTimeout(() => {
         if (hls.subtitleTracks.length === 0 && video.textTracks.length === 0) disableCcButton();
       }, 1000);
@@ -1302,6 +1303,17 @@
     updateCcButton();
     updateMuteIcon();
     document.getElementById('volume-slider').value = video.muted ? 0 : video.volume;
+
+    // Restore volume on first user interaction if auto-muted by browser policy
+    function restoreVolumeOnInteraction() {
+      if (autoMutedByPolicy) {
+        video.muted = false;
+        updateMuteIcon();
+        autoMutedByPolicy = false;
+      }
+    }
+    document.addEventListener('click', restoreVolumeOnInteraction, { once: true });
+    document.addEventListener('keydown', restoreVolumeOnInteraction, { once: true });
 
     // Restore info pinned state
     if (settings.infoPinned) {
