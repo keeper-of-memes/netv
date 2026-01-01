@@ -17,7 +17,9 @@ import time
 log = logging.getLogger(__name__)
 
 APP_DIR = pathlib.Path(__file__).parent
-CACHE_DIR = APP_DIR / "cache"
+# Use old "cache" if it exists (backwards compat), otherwise ".cache"
+_OLD_CACHE = APP_DIR / "cache"
+CACHE_DIR = _OLD_CACHE if _OLD_CACHE.exists() else APP_DIR / ".cache"
 CACHE_DIR.mkdir(exist_ok=True)
 SERVER_SETTINGS_FILE = CACHE_DIR / "server_settings.json"
 USERS_DIR = CACHE_DIR / "users"

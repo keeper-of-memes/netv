@@ -9,6 +9,7 @@ __pycache__/
 uv.lock
 
 # App data
+.cache/
 cache/
 
 # Certificates

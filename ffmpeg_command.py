@@ -73,7 +73,9 @@ _series_probe_cache: dict[int, dict[str, Any]] = {}
 _gpu_nvdec_codecs: set[str] | None = None  # None = not probed yet
 _load_settings: Callable[[], dict[str, Any]] = dict
 
-_CACHE_DIR = pathlib.Path(__file__).parent / "cache"
+# Use old "cache" if it exists (backwards compat), otherwise ".cache"
+_OLD_CACHE = pathlib.Path(__file__).parent / "cache"
+_CACHE_DIR = _OLD_CACHE if _OLD_CACHE.exists() else pathlib.Path(__file__).parent / ".cache"
 _SERIES_PROBE_CACHE_FILE = _CACHE_DIR / "series_probe_cache.json"
 
 _LANG_NAMES = {

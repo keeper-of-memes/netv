@@ -13,7 +13,9 @@ import time
 
 
 APP_DIR = pathlib.Path(__file__).parent
-CACHE_DIR = APP_DIR / "cache"
+# Use old "cache" if it exists (backwards compat), otherwise ".cache"
+_OLD_CACHE = APP_DIR / "cache"
+CACHE_DIR = _OLD_CACHE if _OLD_CACHE.exists() else APP_DIR / ".cache"
 SERVER_SETTINGS_FILE = CACHE_DIR / "server_settings.json"
 USERS_DIR = CACHE_DIR / "users"
 TOKEN_EXPIRY = 86400 * 7  # 7 days
