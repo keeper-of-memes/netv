@@ -23,7 +23,7 @@ HwAccel = Literal["nvidia", "intel", "vaapi", "software"]
 # Timing constants
 _HLS_SEGMENT_DURATION_SEC = 3.0  # Short segments for faster startup/seeking
 _PROBE_CACHE_TTL_SEC = 3_600
-_SERIES_PROBE_CACHE_TTL_SEC = float("inf")  # Never expire
+_SERIES_PROBE_CACHE_TTL_SEC = 7 * 24 * 3_600  # 7 days
 _PROBE_TIMEOUT_SEC = 30
 
 # Segment file naming
@@ -53,6 +53,12 @@ _NVDEC_MIN_COMPUTE: dict[str, float] = {
     "hevc": 6.0,  # Pascal+ (HEVC 10-bit requires Pascal; Maxwell GM206 is edge case we ignore)
     "av1": 8.0,  # Ampere+
 }
+
+# VAAPI/QSV: static conservative lists (unlike NVIDIA, no clean runtime probe available).
+# Could parse `vainfo` output, but format varies by driver (i965 vs iHD vs radeonsi).
+# These codecs are nearly universal on any GPU from the last decade.
+_VAAPI_SAFE_CODECS = {"h264", "hevc", "mpeg2video", "vp8", "vp9"}
+_QSV_SAFE_CODECS = {"h264", "hevc", "mpeg2video", "vp9"}
 
 # Max resolution height by setting
 _MAX_RES_HEIGHT: dict[str, int] = {
@@ -742,10 +748,15 @@ def build_hls_ffmpeg_cmd(
     )
 
     # Full hardware pipeline if GPU supports the codec
-    use_hw_pipeline = bool(
+    codec = media_info.video_codec if media_info else ""
+    use_hw_pipeline = (
         not copy_video
-        and hw in ("nvidia", "intel", "vaapi")
-        and (hw != "nvidia" or (media_info and media_info.video_codec in _get_gpu_nvdec_codecs()))
+        and media_info
+        and (
+            (hw == "nvidia" and codec in _get_gpu_nvdec_codecs())
+            or (hw == "vaapi" and codec in _VAAPI_SAFE_CODECS)
+            or (hw == "intel" and codec in _QSV_SAFE_CODECS)
+        )
     )
 
     # Deinterlace: use probe result if available, else use fallback setting

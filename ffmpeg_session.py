@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import asyncio
+import contextlib
 import json
 import logging
 import pathlib
@@ -62,6 +63,9 @@ class _DeadProcess:
     """Placeholder for dead/recovered processes."""
 
     returncode = -1
+
+    def terminate(self) -> None:
+        pass
 
     def kill(self) -> None:
         pass
@@ -125,8 +129,16 @@ def is_session_valid(session: dict[str, Any]) -> bool:
 
 
 def _kill_process(proc: Any) -> bool:
-    """Kill process, return True if killed."""
+    """Kill process gracefully (SIGTERM then SIGKILL), return True if killed."""
     try:
+        # Try graceful termination first (lets ffmpeg flush buffers)
+        proc.terminate()
+        # Give it a moment to exit cleanly
+        for _ in range(10):  # 100ms total
+            if proc.returncode is not None:
+                return True
+            time.sleep(0.01)
+        # Force kill if still running
         proc.kill()
         return True
     except (ProcessLookupError, OSError):
@@ -344,6 +356,8 @@ def cleanup_and_recover_sessions() -> None:
                     "seek_offset": new_seek,
                     "series_id": info.get("series_id"),
                     "episode_id": info.get("episode_id"),
+                    "username": info.get("username", ""),
+                    "source_id": info.get("source_id", ""),
                 }
                 # Prefer session with seek_offset or more recent mtime
                 existing_id = _url_to_session.get(url)
@@ -368,6 +382,9 @@ def cleanup_and_recover_sessions() -> None:
                     audio_sample_rate=p.get("audio_sample_rate", 0),
                     subtitle_codecs=p.get("subtitle_codecs"),
                     duration=info.get("duration", 0),
+                    height=p.get("height", 0),
+                    video_bitrate=p.get("video_bitrate", 0),
+                    interlaced=p.get("interlaced", False),
                 )
                 subs = [
                     SubtitleStream(s["index"], s.get("lang", "und"), s.get("name", ""))
@@ -904,6 +921,8 @@ async def _do_start_transcode(
             "seek_offset": old_seek_offset,
             "series_id": series_id,
             "episode_id": episode_id,
+            "username": username,
+            "source_id": source_id,
         }
         if media_info:
             session_info["probe"] = {
@@ -913,6 +932,9 @@ async def _do_start_transcode(
                 "audio_channels": media_info.audio_channels,
                 "audio_sample_rate": media_info.audio_sample_rate,
                 "subtitle_codecs": media_info.subtitle_codecs,
+                "height": media_info.height,
+                "video_bitrate": media_info.video_bitrate,
+                "interlaced": media_info.interlaced,
             }
         (pathlib.Path(output_dir) / "session.json").write_text(json.dumps(session_info))
 
@@ -923,7 +945,11 @@ async def _do_start_transcode(
         min_segments=2,
         timeout_sec=timeout,
     ):
-        await asyncio.sleep(_POLL_INTERVAL_SEC)
+        # Wait for process to fully exit and stderr to be captured
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(process.wait(), timeout=1.0)
+        # Give stderr monitor time to process final output
+        await asyncio.sleep(0.1)
         error_msg = "\n".join(stderr_lines[-10:]) if stderr_lines else "unknown"
         log.error(
             "ffmpeg:%s failed (exit %d): %s",

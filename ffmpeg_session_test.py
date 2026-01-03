@@ -42,10 +42,15 @@ class FakeProcess:
         self.returncode = None if alive else 0
         self._killed = killed
 
+    def terminate(self) -> None:
+        if self._killed:
+            raise ProcessLookupError("No such process")
+        self.returncode = -15  # SIGTERM
+
     def kill(self) -> None:
         if self._killed:
             raise ProcessLookupError("No such process")
-        self.returncode = -9
+        self.returncode = -9  # SIGKILL
 
 
 def _clear_session_state():
@@ -84,7 +89,8 @@ class TestKillProcess:
     def test_kill_alive_process(self):
         proc = FakeProcess(alive=True)
         assert _kill_process(proc) is True
-        assert proc.returncode == -9
+        # SIGTERM (-15) is used first; if process exits, SIGKILL (-9) isn't needed
+        assert proc.returncode == -15
 
     def test_kill_already_dead(self):
         proc = FakeProcess(alive=True, killed=True)
@@ -366,8 +372,9 @@ class TestShutdown:
 
         shutdown()
 
-        assert proc1.returncode == -9
-        assert proc2.returncode == -9
+        # SIGTERM (-15) is used first; if process exits, SIGKILL (-9) isn't needed
+        assert proc1.returncode == -15
+        assert proc2.returncode == -15
         assert len(_transcode_sessions) == 0
 
 
