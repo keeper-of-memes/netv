@@ -79,6 +79,8 @@ users who find them overkill and just want a simple IPTV player.
 | **License** | Apache 2.0 | GPL v3 | GPL v2 | GPL v2 | Proprietary |
 | **Stack** | Python, FFmpeg | Node.js | .NET, FFmpeg | .NET, FFmpeg | Proprietary |
 
+*Corrections welcome — [open an issue](https://github.com/jvdillon/netv/issues).*
+
 [nodecast-tv]: https://github.com/technomancer702/nodecast-tv
 [Jellyfin]: https://jellyfin.org
 [Emby]: https://emby.media
