@@ -58,8 +58,8 @@ users who find them overkill and just want a simple IPTV player.
 | **Library permissions** | N/A | N/A | ✅ Per-library | ✅ Per-library | ✅ Per-library |
 | **Favorites** | ✅ Drag-and-drop | ✅ | ✅ | ✅ | ✅ |
 | **Search** | ✅ Regex | ⚠️ Basic | ⚠️ Basic | ⚠️ Basic | ⚠️ Basic |
-| **Video transcoding** | ✅ Server | ❌ No | ✅ Server | ✅ Server | ✅ Server |
-| **Audio transcoding** | ✅ Server | ✅ Server | ✅ Server | ✅ Server | ✅ Server |
+| **Video transcoding** | ✅ | ❌ | ✅ | ✅ | ✅ |
+| **Audio transcoding** | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Transcode only if needed** | ✅ Auto mode | ❌ | ⚠️ Per-library | ⚠️ Per-library | ⚠️ Per-client |
 | **NVENC** | ✅ | ❌ | ✅ | ✅ | ⚠️ Pass |
 | **VAAPI** | ✅ | ❌ | ✅ | ✅ | ⚠️ Pass |
