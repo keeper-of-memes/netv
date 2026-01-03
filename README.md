@@ -37,6 +37,50 @@ If you want a full-featured media center, you'll probably be happier with:
 These are excellent, mature projects with large communities. neTV exists for
 users who find them overkill and just want a simple IPTV player.
 
+How we compare:
+
+| | neTV | [nodecast-tv] | [Jellyfin] | [Emby] | [Plex] |
+|---|---|---|---|---|---|
+| **Focus** | IPTV | IPTV | General media | General media | General media |
+| **Xtream Codes** | Native | Native | No | No | No |
+| **M3U playlists** | Yes | Yes | Yes | Yes | Via [xTeVe] |
+| **XMLTV EPG** | URL or file | Via provider | Yes | Yes | Yes |
+| **Local media** | No | No | Yes | Yes | Yes |
+| **Live TV** | Yes | Yes | Yes | Yes | Yes |
+| **VOD (movies/series)** | Yes | Yes | Yes | Yes | Yes |
+| **DVR recording** | No | No | Yes | Yes | Yes (Pass) |
+| **Catchup/timeshift** | No | No | Plugin | Plugin | No |
+| **Live rewind buffer** | Yes | No | Via DVR | Via DVR | Via DVR |
+| **Resume playback** | Yes | No | Yes | Yes | Yes |
+| **Multi-user** | Yes | Yes | Yes | Yes | Yes |
+| **User roles** | Admin/viewer | Admin/viewer | Granular | Granular | Granular |
+| **Stream limits** | Per-user, per-source | No | Per-user | Per-user | Per-user |
+| **Library permissions** | N/A | N/A | Per-library | Per-library | Per-library |
+| **Favorites** | Drag-and-drop | Yes | Yes | Yes | Yes |
+| **Search** | Regex | Basic | Basic | Basic | Basic |
+| **Transcoding** | Server HLS | Browser | Server HLS | Server HLS | Server HLS |
+| **NVENC** | Yes | No | Yes | Yes | Yes (Pass) |
+| **VAAPI** | Yes | No | Yes | Yes | Yes (Pass) |
+| **QSV** | Yes | No | Yes | Yes | Yes (Pass) |
+| **Stream passthrough** | Auto h264+aac | N/A | Yes | Yes | Yes |
+| **Software fallback** | Yes | N/A | Yes | Yes | Yes |
+| **Legacy GPU** | Any | N/A | Any | Any | Driver 450+ |
+| **Probe caching** | Series-level | Per-request | Database | Database | Database |
+| **Session recovery** | Yes | No | N/A | N/A | N/A |
+| **Auto deinterlace** | Yes | No | Manual | Manual | Manual |
+| **Subtitles** | WebVTT | No | Full | Full | Full |
+| **Chromecast** | Yes | No | Yes | Yes | Yes |
+| **Mobile apps** | Web only | Web only | Native | Native | Native |
+| **Subscription** | Free | Free | Free | Premiere | Pass |
+| **Setup complexity** | Minimal | Minimal | Moderate | Moderate | Moderate |
+| **Stack** | Python, FFmpeg | Node.js | .NET, FFmpeg | .NET, FFmpeg | Proprietary |
+
+[nodecast-tv]: https://github.com/technomancer702/nodecast-tv
+[Jellyfin]: https://jellyfin.org
+[Emby]: https://emby.media
+[Plex]: https://plex.tv
+[xTeVe]: https://github.com/xteve-project/xTeVe
+
 ## Features
 
 - **Live TV** with EPG grid guide
