@@ -135,8 +135,8 @@ class TestIsSessionValid:
         with patch("ffmpeg_session.get_vod_cache_timeout", return_value=3600):
             session = {
                 "process": FakeProcess(alive=False),
-                "started": time.time() - 60,
-                "last_access": time.time() - 60,  # 1 min ago
+                "started": time.time() - 10,
+                "last_access": time.time() - 10,  # 10 sec ago (within 30 sec heartbeat)
                 "is_vod": True,
             }
             assert is_session_valid(session) is True
@@ -242,21 +242,42 @@ class TestStopSession:
             assert session_id not in _transcode_sessions
             assert "http://test" not in _url_to_session
 
-    def test_stop_session_skip_recent(self):
-        """Skip stop for recently-accessed session (race protection)."""
+    def test_stop_session_skip_recent_vod(self):
+        """Skip stop for recently-accessed VOD session (race protection for seeking)."""
         session_id = "test-456"
         with _transcode_lock:
             _transcode_sessions[session_id] = {
                 "process": FakeProcess(alive=True),
                 "dir": "/tmp/test",
                 "url": "http://test",
+                "is_vod": True,  # Grace period only applies to VOD
                 "last_access": time.time(),  # Just now
             }
 
         stop_session(session_id, force=False)
 
-        # Session should still exist because it was recently accessed
+        # VOD session should still exist because it was recently accessed
         assert session_id in _transcode_sessions
+
+    def test_stop_session_kills_live_immediately(self):
+        """Live sessions kill immediately, no grace period."""
+        with tempfile.TemporaryDirectory() as tmp:
+            session_id = "test-live"
+            with _transcode_lock:
+                _transcode_sessions[session_id] = {
+                    "process": FakeProcess(alive=True),
+                    "dir": tmp,
+                    "url": "http://live",
+                    "is_vod": False,
+                    "last_access": time.time(),  # Just now
+                }
+                _url_to_session["http://live"] = session_id
+
+            with patch("ffmpeg_session.get_live_cache_timeout", return_value=0):
+                stop_session(session_id, force=False)
+
+            # Live session should be killed immediately, no grace period
+            assert session_id not in _transcode_sessions
 
     def test_stop_session_caches_vod(self):
         """Stop caches VOD session instead of removing it."""

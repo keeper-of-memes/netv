@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 # Timing constants
 _POLL_INTERVAL_SEC = 0.2
 _QUICK_FAILURE_THRESHOLD_SEC = 10.0
-_HEARTBEAT_TIMEOUT_SEC = 300.0  # 5 min without progress poll = dead
+_HEARTBEAT_TIMEOUT_SEC = 30.0  # 30 sec without progress poll = dead
 
 # Wait timeouts (seconds)
 _PLAYLIST_WAIT_TIMEOUT_SEC = 30.0
@@ -108,7 +108,7 @@ def is_session_valid(session: dict[str, Any]) -> bool:
     last_access = session.get("last_access", session["started"])
     time_since_heartbeat = time.time() - last_access
 
-    # No heartbeat in 5 min = dead regardless of process state
+    # No heartbeat in 30 sec = dead regardless of process state
     if time_since_heartbeat > _HEARTBEAT_TIMEOUT_SEC:
         return False
 
@@ -145,9 +145,14 @@ def stop_session(session_id: str, force: bool = False) -> None:
         if not session:
             return
 
-        # Skip stop if session was accessed recently (race with page navigation)
-        if not force and time.time() - session.get("last_access", 0) < 5.0:
-            log.info("Ignoring stop for recently-accessed session %s", session_id)
+        # Skip stop if VOD session was accessed recently (race with seeking/resume)
+        # Live streams kill immediately - no resume needed
+        if (
+            not force
+            and session.get("is_vod")
+            and time.time() - session.get("last_access", 0) < 5.0
+        ):
+            log.info("Ignoring stop for recently-accessed VOD session %s", session_id)
             return
 
         if _kill_process(session["process"]):
