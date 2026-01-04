@@ -6,7 +6,7 @@
   {% if movie %}
   <div class="flex gap-2 sm:gap-6 mb-6">
     {% if movie.cover_big or movie.stream_icon %}
-    <img src="{{ movie.cover_big or movie.stream_icon }}" alt="" class="w-24 sm:w-36 lg:w-48 h-auto max-h-72 object-cover rounded-lg flex-shrink-0">
+    <img src="{{ (movie.cover_big or movie.stream_icon) | logo_url }}" alt="" class="w-24 sm:w-36 lg:w-48 h-auto max-h-72 object-cover rounded-lg flex-shrink-0">
     {% endif %}
     <div class="min-w-0 flex-1">
       <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
@@ -63,7 +63,7 @@
 let favorites = {{ favorites | tojson }};
 const MOVIE_ID = '{{ movie.stream_id if movie else "" }}';
 const MOVIE_NAME = '{{ movie.name | e if movie else "" }}';
-const MOVIE_COVER = '{{ movie.stream_icon | e if movie else "" }}';
+const MOVIE_COVER = '{{ (movie.stream_icon or "") | logo_url | e if movie else "" }}';
 const MOVIE_EXT = '{{ movie.container_extension or "mkv" if movie else "mkv" }}';
 
 function saveFavorites() {

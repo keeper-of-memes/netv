@@ -6,12 +6,14 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+import hashlib
 import json
 import logging
 import pathlib
 import subprocess
 import threading
 import time
+import urllib.parse
 
 
 log = logging.getLogger(__name__)
@@ -24,6 +26,8 @@ CACHE_DIR.mkdir(exist_ok=True)
 SERVER_SETTINGS_FILE = CACHE_DIR / "server_settings.json"
 USERS_DIR = CACHE_DIR / "users"
 USERS_DIR.mkdir(exist_ok=True)
+LOGOS_DIR = CACHE_DIR / "logos"
+LOGOS_DIR.mkdir(exist_ok=True)
 
 # Cache TTLs in seconds
 LIVE_CACHE_TTL = 2 * 3600  # 2 hours
@@ -32,6 +36,9 @@ VOD_CACHE_TTL = 12 * 3600  # 12 hours
 SERIES_CACHE_TTL = 12 * 3600  # 12 hours
 INFO_CACHE_TTL = 7 * 24 * 3600  # 7 days max for series/movie info
 INFO_CACHE_STALE = 24 * 3600  # Refresh in background after 24 hours
+LOGO_CACHE_TTL = 7 * 24 * 3600  # 7 days for logos (server-side)
+LOGO_BROWSER_TTL = 24 * 3600  # 1 day for browser cache (re-validates before server expires)
+LOGO_MAX_SIZE = 1024 * 1024  # 1MB max logo size
 
 # In-memory cache
 _cache: dict[str, Any] = {}
@@ -108,6 +115,74 @@ def get_cache() -> dict[str, Any]:
 def get_cache_lock() -> threading.Lock:
     """Get cache lock."""
     return _cache_lock
+
+
+def _sanitize_name(name: str) -> str:
+    """Sanitize a name for use as a directory/file name."""
+    # Remove path traversal and special chars
+    name = name.replace("..", "").replace("/", "_").replace("\\", "_")
+    name = "".join(c for c in name if c.isalnum() or c in "-_ ")
+    return name[:224] or "default"
+
+
+def _url_to_filename(url: str) -> str:
+    """Derive a readable filename from URL with hash suffix to avoid collisions."""
+    # Always include hash suffix to avoid collisions
+    url_hash = hashlib.md5(url.encode()).hexdigest()[:8]
+    parsed = urllib.parse.urlparse(url)
+    path = parsed.path.rstrip("/")
+    if path:
+        # Get last path component
+        name = path.split("/")[-1]
+        # Strip extension, we'll add our own
+        if "." in name:
+            name = name.rsplit(".", 1)[0]
+        name = _sanitize_name(name)
+        if name and len(name) >= 2:
+            return f"{name}_{url_hash}"
+    return url_hash
+
+
+def get_cached_logo(source_name: str, url: str) -> pathlib.Path | None:
+    """Get cached logo path if valid and not expired. Returns None if not cached."""
+    safe_source = _sanitize_name(source_name)
+    filename = _url_to_filename(url)
+    source_dir = LOGOS_DIR / safe_source
+    if not source_dir.exists():
+        return None
+    # Look for file with any extension
+    for ext in ("png", "jpg", "jpeg", "gif", "webp", "svg"):
+        path = source_dir / f"{filename}.{ext}"
+        if path.exists():
+            age = time.time() - path.stat().st_mtime
+            if age < LOGO_CACHE_TTL:
+                return path
+            # Expired, delete it
+            path.unlink(missing_ok=True)
+    return None
+
+
+def save_logo(source_name: str, url: str, data: bytes, content_type: str) -> pathlib.Path:
+    """Save logo to cache. Returns the saved path."""
+    safe_source = _sanitize_name(source_name)
+    filename = _url_to_filename(url)
+    source_dir = LOGOS_DIR / safe_source
+    source_dir.mkdir(parents=True, exist_ok=True)
+    # Determine extension from content-type
+    ext_map = {
+        "image/png": "png",
+        "image/jpeg": "jpg",
+        "image/gif": "gif",
+        "image/webp": "webp",
+        "image/svg+xml": "svg",
+    }
+    ext = ext_map.get(content_type.split(";")[0].strip(), "png")
+    path = source_dir / f"{filename}.{ext}"
+    # Atomic write: write to temp file then rename
+    tmp = path.with_suffix(".tmp")
+    tmp.write_bytes(data)
+    tmp.rename(path)
+    return path
 
 
 def get_cached_info(cache_key: str, fetch_fn: Callable[[], Any], force: bool = False) -> Any:

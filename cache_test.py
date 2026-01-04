@@ -418,6 +418,106 @@ class TestEncoderDetection:
             cache.AVAILABLE_ENCODERS = original
 
 
+class TestLogoCache:
+    """Tests for logo caching functions."""
+
+    def test_sanitize_name_removes_path_traversal(self):
+        assert ".." not in cache._sanitize_name("../../../etc/passwd")
+        assert "/" not in cache._sanitize_name("foo/bar")
+        assert "\\" not in cache._sanitize_name("foo\\bar")
+
+    def test_sanitize_name_keeps_safe_chars(self):
+        assert cache._sanitize_name("my-source_123") == "my-source_123"
+        assert cache._sanitize_name("Source Name") == "Source Name"
+
+    def test_sanitize_name_truncates_long_names(self):
+        long_name = "a" * 300
+        result = cache._sanitize_name(long_name)
+        assert len(result) == 224
+
+    def test_sanitize_name_empty_returns_default(self):
+        assert cache._sanitize_name("") == "default"
+        assert cache._sanitize_name("!!!") == "default"
+
+    def test_url_to_filename_extracts_name(self):
+        result = cache._url_to_filename("http://example.com/logos/channel1.png")
+        assert result.startswith("channel1_")
+        assert len(result) == len("channel1_") + 8  # name + underscore + 8 char hash
+
+    def test_url_to_filename_strips_extension(self):
+        result = cache._url_to_filename("http://example.com/logo.png")
+        assert not result.endswith(".png")
+        assert result.startswith("logo_")
+
+    def test_url_to_filename_hash_differs_by_url(self):
+        r1 = cache._url_to_filename("http://example.com/a/logo.png")
+        r2 = cache._url_to_filename("http://example.com/b/logo.png")
+        # Same base name but different hashes
+        assert r1.startswith("logo_")
+        assert r2.startswith("logo_")
+        assert r1 != r2
+
+    def test_url_to_filename_fallback_to_hash(self):
+        result = cache._url_to_filename("http://example.com/")
+        assert len(result) == 8  # Just the hash
+
+    def test_save_and_get_cached_logo(self, cache_module, tmp_path):
+        cache_module.LOGOS_DIR = tmp_path / "logos"
+        cache_module.LOGOS_DIR.mkdir()
+
+        # Save a logo
+        data = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100  # Fake PNG
+        path = cache_module.save_logo(
+            "TestSource", "http://example.com/logo.png", data, "image/png"
+        )
+        assert path.exists()
+        assert path.suffix == ".png"
+        assert path.read_bytes() == data
+
+        # Get cached logo
+        cached = cache_module.get_cached_logo("TestSource", "http://example.com/logo.png")
+        assert cached == path
+
+    def test_get_cached_logo_returns_none_when_missing(self, cache_module, tmp_path):
+        cache_module.LOGOS_DIR = tmp_path / "logos"
+        cache_module.LOGOS_DIR.mkdir()
+
+        cached = cache_module.get_cached_logo("NoSource", "http://missing.com/logo.png")
+        assert cached is None
+
+    def test_get_cached_logo_expires(self, cache_module, tmp_path):
+        import time
+
+        cache_module.LOGOS_DIR = tmp_path / "logos"
+        cache_module.LOGOS_DIR.mkdir()
+
+        # Save a logo
+        data = b"\x89PNG" + b"\x00" * 100
+        path = cache_module.save_logo("TestSource", "http://example.com/old.png", data, "image/png")
+
+        # Backdate the file
+        old_time = time.time() - cache_module.LOGO_CACHE_TTL - 100
+        import os
+
+        os.utime(path, (old_time, old_time))
+
+        # Should be expired
+        cached = cache_module.get_cached_logo("TestSource", "http://example.com/old.png")
+        assert cached is None
+        assert not path.exists()  # Should be deleted
+
+    def test_save_logo_content_type_mapping(self, cache_module, tmp_path):
+        cache_module.LOGOS_DIR = tmp_path / "logos"
+        cache_module.LOGOS_DIR.mkdir()
+
+        data = b"test"
+        assert cache_module.save_logo("s", "http://a.com/1", data, "image/jpeg").suffix == ".jpg"
+        assert cache_module.save_logo("s", "http://a.com/2", data, "image/gif").suffix == ".gif"
+        assert cache_module.save_logo("s", "http://a.com/3", data, "image/webp").suffix == ".webp"
+        assert cache_module.save_logo("s", "http://a.com/4", data, "image/svg+xml").suffix == ".svg"
+        assert cache_module.save_logo("s", "http://a.com/5", data, "unknown/type").suffix == ".png"
+
+
 if __name__ == "__main__":
     from testing import run_tests
 

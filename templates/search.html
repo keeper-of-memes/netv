@@ -47,7 +47,7 @@
          class="block bg-gray-800 rounded-lg p-4 hover:ring-2 hover:ring-blue-500 focus:ring-2 focus:ring-blue-500 focusable transition-all flex flex-col items-center"
          tabindex="0" data-nav="grid">
         {% if stream.stream_icon %}
-        <img src="{{ stream.stream_icon }}" alt="" class="w-16 h-16 object-contain mb-2"
+        <img src="{{ stream.stream_icon | logo_url }}" alt="" class="w-16 h-16 object-contain mb-2"
              onerror="this.style.display='none'">
         {% endif %}
         <span class="text-center line-clamp-2">{{ stream.name }}</span>
@@ -64,13 +64,13 @@
     <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
       {% for movie in results.vod %}
       <div class="movie-card relative group" data-movie-id="{{ movie.stream_id }}" data-movie-name="{{ movie.name }}"
-           data-movie-cover="{{ movie.stream_icon or '' }}" data-movie-ext="{{ movie.container_extension or 'mkv' }}">
+           data-movie-cover="{{ (movie.stream_icon or '') | logo_url }}" data-movie-ext="{{ movie.container_extension or 'mkv' }}">
         <a href="/movie/{{ movie.stream_id }}"
            class="block bg-gray-800 rounded-lg overflow-hidden hover:ring-2 hover:ring-blue-500 focus:ring-2 focus:ring-blue-500 focusable transition-all"
            tabindex="0" data-nav="grid">
           <div class="aspect-[2/3] bg-gray-700">
             {% if movie.stream_icon %}
-            <img src="{{ movie.stream_icon }}" alt="" class="w-full h-full object-cover" loading="lazy"
+            <img src="{{ movie.stream_icon | logo_url }}" alt="" class="w-full h-full object-cover" loading="lazy"
                  onerror="this.style.display='none'">
             {% endif %}
           </div>
@@ -79,7 +79,7 @@
           </div>
         </a>
         <button type="button" class="fav-btn-movie absolute top-2 right-2 w-8 h-8 rounded-full bg-black/50 text-xl opacity-0 group-hover:opacity-100 transition-opacity z-10"
-                onclick='toggleMovieFavorite({{ movie.stream_id | tojson }}, {{ movie.name | tojson }}, {{ (movie.stream_icon or "") | tojson }}, {{ (movie.container_extension or "mkv") | tojson }})'>
+                onclick='toggleMovieFavorite({{ movie.stream_id | tojson }}, {{ movie.name | tojson }}, {{ (movie.stream_icon or "") | logo_url | tojson }}, {{ (movie.container_extension or "mkv") | tojson }})'>
           ☆
         </button>
       </div>
@@ -94,13 +94,13 @@
     <h3 class="text-2xl font-semibold mb-4">Series ({{ results.series|length }})</h3>
     <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
       {% for s in results.series %}
-      <div class="series-card relative group" data-series-id="{{ s.series_id }}" data-series-name="{{ s.name }}" data-series-cover="{{ s.cover or '' }}">
+      <div class="series-card relative group" data-series-id="{{ s.series_id }}" data-series-name="{{ s.name }}" data-series-cover="{{ (s.cover or '') | logo_url }}">
         <a href="/series/{{ s.series_id }}"
            class="block bg-gray-800 rounded-lg overflow-hidden hover:ring-2 hover:ring-blue-500 focus:ring-2 focus:ring-blue-500 focusable transition-all"
            tabindex="0" data-nav="grid">
           <div class="aspect-[2/3] bg-gray-700">
             {% if s.cover %}
-            <img src="{{ s.cover }}" alt="" class="w-full h-full object-cover" loading="lazy"
+            <img src="{{ s.cover | logo_url }}" alt="" class="w-full h-full object-cover" loading="lazy"
                  onerror="this.style.display='none'">
             {% endif %}
           </div>
@@ -109,7 +109,7 @@
           </div>
         </a>
         <button type="button" class="fav-btn-series absolute top-2 right-2 w-8 h-8 rounded-full bg-black/50 text-xl opacity-0 group-hover:opacity-100 transition-opacity z-10"
-                onclick='toggleSeriesFavorite({{ s.series_id | tojson }}, {{ s.name | tojson }}, {{ (s.cover or "") | tojson }})'>
+                onclick='toggleSeriesFavorite({{ s.series_id | tojson }}, {{ s.name | tojson }}, {{ (s.cover or "") | logo_url | tojson }})'>
           ☆
         </button>
       </div>

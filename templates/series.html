@@ -52,13 +52,13 @@
     </div>
     <div class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 gap-2 sm:gap-3 pb-4">
       {% for s in series %}
-      <div class="series-card relative group" data-series-id="{{ s.series_id }}" data-series-name="{{ s.name }}" data-series-cover="{{ s.cover or '' }}">
+      <div class="series-card relative group" data-series-id="{{ s.series_id }}" data-series-name="{{ s.name }}" data-series-cover="{{ (s.cover or '') | logo_url }}">
         <a href="/series/{{ s.series_id }}"
            class="block bg-gray-800 rounded-lg overflow-hidden hover:ring-2 hover:ring-blue-500 focus:ring-2 focus:ring-blue-500 focusable transition-all"
            tabindex="0" data-nav="grid" title="{{ s.name }}{% if s.rating %}&#10;★ {{ s.rating }}{% endif %}">
           <div class="aspect-[2/3] bg-gray-700">
             {% if s.cover %}
-            <img src="{{ s.cover }}" alt="" class="w-full h-full object-cover" loading="lazy"
+            <img src="{{ s.cover | logo_url }}" alt="" class="w-full h-full object-cover" loading="lazy"
                  onerror="this.style.display='none'">
             {% endif %}
           </div>
@@ -70,7 +70,7 @@
           </div>
         </a>
         <button type="button" class="fav-btn absolute top-2 right-2 w-8 h-8 rounded-full bg-black/50 text-xl opacity-0 group-hover:opacity-100 transition-opacity z-10"
-                onclick='toggleFavorite({{ s.series_id | tojson }}, {{ s.name | tojson }}, {{ (s.cover or "") | tojson }})'>
+                onclick='toggleFavorite({{ s.series_id | tojson }}, {{ s.name | tojson }}, {{ (s.cover or "") | logo_url | tojson }})'>
           ☆
         </button>
       </div>

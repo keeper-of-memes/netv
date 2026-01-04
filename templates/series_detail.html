@@ -6,7 +6,7 @@
   {% if series.info %}
   <div class="flex gap-2 sm:gap-6 mb-6">
     {% if series.info.cover %}
-    <img src="{{ series.info.cover }}" alt="" class="w-24 sm:w-36 lg:w-48 h-auto max-h-72 object-cover rounded-lg flex-shrink-0">
+    <img src="{{ series.info.cover | logo_url }}" alt="" class="w-24 sm:w-36 lg:w-48 h-auto max-h-72 object-cover rounded-lg flex-shrink-0">
     {% endif %}
     <div class="min-w-0 flex-1">
       <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
@@ -74,7 +74,7 @@
 let favorites = {{ favorites | tojson }};
 const SERIES_ID = '{{ series_id }}';
 const SERIES_NAME = '{{ series.info.name | e if series.info else "" }}';
-const SERIES_COVER = '{{ series.info.cover | e if series.info else "" }}';
+const SERIES_COVER = '{{ (series.info.cover or "") | logo_url | e if series.info else "" }}';
 
 function saveFavorites() {
   fetch('/api/user-prefs', {

@@ -54,12 +54,15 @@ from auth import create_token, verify_password, verify_token
 from cache import (
     AVAILABLE_ENCODERS,
     CACHE_DIR,
+    LOGO_BROWSER_TTL,
+    LOGO_MAX_SIZE,
     Source,
     clear_all_caches,
     clear_all_file_caches,
     get_cache,
     get_cache_lock,
     get_cached_info,
+    get_cached_logo,
     get_sources,
     get_watch_position,
     load_file_cache,
@@ -67,6 +70,7 @@ from cache import (
     load_user_settings,
     refresh_encoders,
     save_file_cache,
+    save_logo,
     save_server_settings,
     save_user_settings,
     save_watch_position,
@@ -112,6 +116,19 @@ _LOGIN_MAX_ATTEMPTS = 10
 APP_DIR = pathlib.Path(__file__).parent
 TEMPLATES = Jinja2Templates(directory=APP_DIR / "templates")
 TEMPLATES.env.auto_reload = True
+
+
+def _logo_url_filter(url: str) -> str:
+    """Wrap external logo URLs through /api/logo proxy."""
+    if not url or url.startswith("/") or url.startswith("data:"):
+        return url  # Already local or data URL
+    # Use hostname as source for organization
+    parsed = urllib.parse.urlparse(url)
+    source = parsed.netloc.split(":")[0] if parsed.netloc else "external"
+    return f"/api/logo?source={urllib.parse.quote(source)}&url={urllib.parse.quote(url)}"
+
+
+TEMPLATES.env.filters["logo_url"] = _logo_url_filter
 
 # Thread locks for fetch operations
 _fetch_locks: dict[str, threading.Lock] = {
@@ -2282,6 +2299,52 @@ async def save_user_prefs(
             settings[key] = data[key]
     save_user_settings(username, settings)
     return {"ok": True}
+
+
+def _fetch_logo(url: str, timeout: int = 10) -> tuple[bytes, str]:
+    """Fetch logo synchronously. Returns (data, content_type)."""
+    from util import safe_urlopen
+
+    with safe_urlopen(url, timeout=timeout) as resp:
+        content_type = resp.headers.get("Content-Type", "")
+        if not content_type.startswith("image/"):
+            raise ValueError("URL is not an image")
+        data = resp.read(LOGO_MAX_SIZE)
+        if len(data) >= LOGO_MAX_SIZE:
+            raise ValueError("Image too large")
+    return data, content_type
+
+
+@app.get("/api/logo")
+async def get_logo(
+    url: str,
+    _user: Annotated[dict, Depends(require_auth)],
+    source: str = "default",
+):
+    """Proxy and cache external logos to avoid mixed-content issues."""
+    if not url:
+        raise HTTPException(400, "Missing url parameter")
+    # Check cache first
+    cached = get_cached_logo(source, url)
+    if cached:
+        return FileResponse(cached, headers={"Cache-Control": f"max-age={LOGO_BROWSER_TTL}"})
+    # Validate URL scheme
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(400, "Invalid URL scheme")
+    # Fetch the logo (in thread to avoid blocking)
+    try:
+        data, content_type = await asyncio.to_thread(_fetch_logo, url)
+        path = save_logo(source, url, data, content_type)
+        return FileResponse(path, headers={"Cache-Control": f"max-age={LOGO_BROWSER_TTL}"})
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    except urllib.error.URLError as e:
+        log.debug("Logo fetch failed for %s: %s", url, e)
+        raise HTTPException(502, "Failed to fetch logo") from None
+    except Exception as e:
+        log.debug("Logo fetch error for %s: %s", url, e)
+        raise HTTPException(500, "Logo fetch error") from None
 
 
 @app.post("/settings/transcode")
