@@ -170,25 +170,6 @@ NETV_PORT=9000 docker compose up -d        # custom port
 NETV_HTTPS=1 docker compose up -d          # enable HTTPS (mount certs first)
 ```
 
-### Local Install
-
-Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/):
-
-```bash
-git clone https://github.com/jvdillon/netv.git
-cd netv
-uv run ./main.py --port 8000  # --https
-```
-
-Or with pip:
-
-```bash
-pip install .
-./main.py --port 8000
-```
-
-Open http://localhost:8000, create an admin account, and add your IPTV source.
-
 ### Debian/Ubuntu (`systemd`)
 
 For peak FFMPEG performance, Chromecast (requires HTTPS), and auto-start:
@@ -221,6 +202,25 @@ There's also some gems in `tools/`:
 - `zap2xml.py`: Scrape guide data into XML (I `crontab` this at 5am daily).
 - `alignm3u.py`: Useful for reworking your HDHomeRun m3u to align with guide.
 - `xtream2m3u.py`: Dump xtream to m3u, useful for making Emby work with IPTV.
+
+### Development/Testing
+
+Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/):
+
+```bash
+git clone https://github.com/jvdillon/netv.git
+cd netv
+uv run ./main.py --port 8000  # --https
+```
+
+Or with pip:
+
+```bash
+pip install .
+./main.py --port 8000
+```
+
+Open http://localhost:8000, create an admin account, and add your IPTV source.
 
 ## Troubleshooting
 
@@ -267,12 +267,12 @@ LOG_LEVEL=DEBUG ./main.py
 
 ## Q&A
 
-**Where can I get free IPTV?**
+### Where can I get free IPTV?
 
 Check out [iptv-org/iptv](https://github.com/iptv-org/iptv) -- a community-maintained
 collection of publicly available IPTV channels from around the world.
 
-**Where can I get TV guide data?**
+### Where can I get TV guide data?
 
 The free choice is [iptv-org/epg](https://github.com/iptv-org/epg), but this
 has never worked reliably for me.
@@ -283,7 +283,7 @@ your membership helps fund Open Source projects.
 Alternatively you can use `tools/zap2xml.py`. I've used this for over a year
 and found it to be very reliable -- it scrapes guide data from zap2it/gracenote.
 
-**How do I set up HDHomeRun?**
+### How do I set up HDHomeRun?
 
 HDHomeRun devices provide an M3U playlist, but it lacks EPG channel IDs. Use the
 `tools/` to fetch guide data and align it:
@@ -304,7 +304,7 @@ Then add `tools/ota.m3u` as an M3U source in neTV settings.
 And set up a cron job to refresh the guide daily (e.g.,
 `0 5 * * *  /usr/bin/python3 /path/to/netv/tools/zap2xml.py --zip 90210 && cp /path/to/netv/tools/xmltv.xml /var/www/html/`).
 
-**What are the keyboard shortcuts?**
+### What are the keyboard shortcuts?
 
 | Key | Action |
 |-----|--------|
@@ -318,7 +318,7 @@ And set up a cron job to refresh the guide daily (e.g.,
 | `j` | Jump to time |
 | `Esc` | Back / close |
 
-**What Does "neTV" Mean?**
+### What Does "neTV" Mean?
 
 Yes.
 
