@@ -39,6 +39,7 @@ class FakeMediaInfo:
         pix_fmt: str = "yuv420p",
         audio_channels: int = 2,
         audio_sample_rate: int = 48000,
+        audio_profile: str = "LC",
         height: int = 1080,
         interlaced: bool = False,
     ):
@@ -47,6 +48,7 @@ class FakeMediaInfo:
         self.pix_fmt = pix_fmt
         self.audio_channels = audio_channels
         self.audio_sample_rate = audio_sample_rate
+        self.audio_profile = audio_profile
         self.height = height
         self.interlaced = interlaced
 
