@@ -128,31 +128,47 @@ users who find them overkill and just want a simple IPTV player.
 
 ### Docker
 
-#### Optimized Install (Recommended)
+#### Pre-built Image (Easiest)
+
+Create a `docker-compose.yml`:
+
+```yaml
+services:
+  netv:
+    image: ghcr.io/jvdillon/netv:latest
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./cache:/app/cache
+      - /etc/localtime:/etc/localtime:ro
+    devices:
+      - /dev/dri:/dev/dri  # for hardware transcoding (remove if no GPU)
+    restart: unless-stopped
+```
+
+Then run:
+
+```bash
+docker compose up -d
+```
+
+Open http://localhost:8000. To update: `docker compose pull && docker compose up -d`
+
+#### Build from Source
+
+For customization or development:
 
 ```bash
 git clone https://github.com/jvdillon/netv.git
 cd netv
-docker compose build
+docker compose build                              # optimized FFmpeg (default)
+# FFMPEG_IMAGE=ubuntu:24.04 docker compose build  # or stock FFmpeg
 docker compose up -d
 ```
 
-Open http://localhost:8000.
+To update: `git pull && docker compose build && docker compose up -d`
 
-#### Ubuntu Stock Install (Not Recommended)
-
-```bash
-git clone https://github.com/jvdillon/netv.git
-cd netv
-FFMPEG_IMAGE=ubuntu:24.04 docker compose build
-docker compose up -d
-```
-
-Open http://localhost:8000.
-
-#### Why Prefer Optimized?
-
-| | Optimized | Ubuntu Stock |
+| | Optimized (default) | Ubuntu Stock |
 |---|---|---|
 | FFmpeg source | Pre-built with all codecs | apt (Ubuntu repos) |
 | NVENC (NVIDIA) | ✅ | ❌ |
@@ -160,8 +176,6 @@ Open http://localhost:8000.
 | QSV (Intel QuickSync) | ✅ | ❌ |
 | libfdk-aac | ✅ | ❌ |
 | SVT-AV1 | ✅ | ❌ |
-
-Verify available encoders: `docker exec netv ffmpeg -encoders | grep -E 'nvenc|vaapi|qsv'`
 
 #### Options
 
