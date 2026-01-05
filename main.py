@@ -83,6 +83,7 @@ from m3u import (
     fetch_source_vod_data,
     get_first_xtream_client,
     get_refresh_in_progress,
+    get_xtream_client_by_source,
     load_all_live_data,
     load_series_data,
     load_vod_data,
@@ -1201,23 +1202,27 @@ def _get_live_player_info(stream_id: str) -> PlayerInfo:
 
 def _get_movie_player_info(stream_id: str, ext: str) -> PlayerInfo:
     """Get player info for movie."""
-    xtream = get_first_xtream_client()
-    if not xtream:
-        return PlayerInfo()
-
-    ext = ext or "mkv"
-    info = PlayerInfo(url=xtream.build_stream_url("movie", int(stream_id), ext))
-
-    # Get source_id from cached movie data for access control
+    # Find movie in cache to get its source_id
+    cached_movie = None
     if "vod_streams" in get_cache():
         cached_movie = next(
             (m for m in get_cache()["vod_streams"] if str(m.get("stream_id")) == str(stream_id)),
             None,
         )
-        if cached_movie:
-            info.source_id = cached_movie.get("source_id", "")
 
-    cache_key = f"vod_info_{stream_id}"
+    # Get client for the movie's source (fall back to first if not found)
+    source_id = cached_movie.get("source_id", "") if cached_movie else ""
+    xtream = get_xtream_client_by_source(source_id) if source_id else None
+    if not xtream:
+        xtream = get_first_xtream_client()
+    if not xtream:
+        return PlayerInfo()
+
+    ext = ext or "mkv"
+    info = PlayerInfo(url=xtream.build_stream_url("movie", int(stream_id), ext))
+    info.source_id = source_id
+
+    cache_key = f"vod_info_{source_id}_{stream_id}"
     try:
         movie = get_cached_info(cache_key, lambda: xtream.get_vod_info(int(stream_id)))
     except (urllib.error.URLError, TimeoutError):
@@ -1235,39 +1240,32 @@ def _get_series_player_info(
     stream_id: str, series_id: int | None, ext: str
 ) -> tuple[PlayerInfo, str | None]:
     """Get player info for series episode. Returns (info, next_episode_url)."""
-    xtream = get_first_xtream_client()
-    if not xtream:
-        return PlayerInfo(), None
-
-    ext = ext or "mkv"
-    info = PlayerInfo(url=xtream.build_stream_url("series", int(stream_id), ext))
-
-    # Get source_id from cached series data for access control
+    # Find series in cache to get its source_id
+    cached_series = None
+    source_id = ""
     if series_id and "series" in get_cache():
         cached_series = next(
             (s for s in get_cache()["series"] if str(s.get("series_id")) == str(series_id)),
             None,
         )
         if cached_series:
-            info.source_id = cached_series.get("source_id", "")
-            log.info("Series %s found in cache, source_id=%s", series_id, info.source_id)
-        else:
-            log.warning(
-                "Series %s not found in cache (cache has %d entries)",
-                series_id,
-                len(get_cache()["series"]),
-            )
-    else:
-        log.warning(
-            "Series lookup skipped: series_id=%s, 'series' in cache=%s",
-            series_id,
-            "series" in get_cache(),
-        )
+            source_id = cached_series.get("source_id", "")
+
+    # Get client for the series' source (fall back to first if not found)
+    xtream = get_xtream_client_by_source(source_id) if source_id else None
+    if not xtream:
+        xtream = get_first_xtream_client()
+    if not xtream:
+        return PlayerInfo(), None
+
+    ext = ext or "mkv"
+    info = PlayerInfo(url=xtream.build_stream_url("series", int(stream_id), ext))
+    info.source_id = source_id
 
     if not series_id:
         return info, None
 
-    cache_key = f"series_info_{series_id}"
+    cache_key = f"series_info_{source_id}_{series_id}"
     try:
         series = get_cached_info(cache_key, lambda: xtream.get_series_info(series_id))
     except (urllib.error.URLError, TimeoutError) as e:
@@ -2169,19 +2167,27 @@ async def settings_refresh_source(
 
             elif refresh_type == "vod" and source.type == "xtream":
                 log.info("Refreshing VOD for source: %s", source.name)
-                cats, streams = fetch_source_vod_data(source)
-                # For now, VOD is single-source, so just replace entirely
+                new_cats, new_streams = fetch_source_vod_data(source)
+                # Merge with existing data from other sources
+                existing_cats, existing_streams = load_vod_data()
+                # Remove old data from this source, keep others
+                merged_cats = [c for c in existing_cats if c.get("source_id") != source_id]
+                merged_streams = [s for s in existing_streams if s.get("source_id") != source_id]
+                # Add new data from this source
+                merged_cats.extend(new_cats)
+                merged_streams.extend(new_streams)
                 with get_cache_lock():
                     get_cache().pop("vod_categories", None)
                     get_cache().pop("vod_streams", None)
                 for f in CACHE_DIR.glob("vod_data*.json"):
                     f.unlink(missing_ok=True)
-                save_file_cache("vod_data", {"cats": cats, "streams": streams})
+                save_file_cache("vod_data", {"cats": merged_cats, "streams": merged_streams})
                 log.info(
-                    "VOD refresh complete for %s: %d cats, %d streams",
+                    "VOD refresh complete for %s: %d cats, %d streams (total: %d)",
                     source.name,
-                    len(cats),
-                    len(streams),
+                    len(new_cats),
+                    len(new_streams),
+                    len(merged_streams),
                 )
 
             elif refresh_type == "m3u" and source.type == "m3u":

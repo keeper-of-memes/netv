@@ -187,7 +187,14 @@ def fetch_source_vod_data(source: Any) -> tuple[list[dict], list[dict]]:
     if source.type != "xtream":
         return [], []
     client = XtreamClient(source.url, source.username, source.password)
-    return client.get_vod_categories(), client.get_vod_streams()
+    cats = client.get_vod_categories()
+    streams = client.get_vod_streams()
+    # Tag with source_id for playback
+    for c in cats:
+        c["source_id"] = source.id
+    for s in streams:
+        s["source_id"] = source.id
+    return cats, streams
 
 
 def parse_epg_urls(raw: list) -> list[tuple[str, int, str]]:
@@ -243,18 +250,26 @@ def load_all_live_data() -> tuple[list[dict], list[dict], list[tuple[str, int, s
 
 
 def _fetch_vod_data() -> tuple[list[dict], list[dict]]:
-    """Fetch VOD categories and streams from first Xtream source."""
-    source_id, xtream = get_first_xtream_source_and_client()
-    if not xtream:
-        return [], []
-    cats = xtream.get_vod_categories()
-    streams = xtream.get_vod_streams()
-    # Add source_id for access control
-    for c in cats:
-        c["source_id"] = source_id
-    for s in streams:
-        s["source_id"] = source_id
-    return cats, streams
+    """Fetch VOD categories and streams from all Xtream sources."""
+    all_cats: list[dict] = []
+    all_streams: list[dict] = []
+    for source in get_sources():
+        if source.type != "xtream":
+            continue
+        try:
+            client = XtreamClient(source.url, source.username, source.password)
+            cats = client.get_vod_categories()
+            streams = client.get_vod_streams()
+            # Tag with source_id for playback and access control
+            for c in cats:
+                c["source_id"] = source.id
+            for s in streams:
+                s["source_id"] = source.id
+            all_cats.extend(cats)
+            all_streams.extend(streams)
+        except Exception as e:
+            log.warning("Failed to fetch VOD from source %s: %s", source.id, e)
+    return all_cats, all_streams
 
 
 def load_vod_data() -> tuple[list[dict], list[dict]]:
@@ -301,18 +316,26 @@ def load_vod_data() -> tuple[list[dict], list[dict]]:
 
 
 def _fetch_series_data() -> tuple[list[dict], list[dict]]:
-    """Fetch series categories and list from first Xtream source."""
-    source_id, xtream = get_first_xtream_source_and_client()
-    if not xtream:
-        return [], []
-    cats = xtream.get_series_categories()
-    series = xtream.get_series()
-    # Add source_id for access control
-    for c in cats:
-        c["source_id"] = source_id
-    for s in series:
-        s["source_id"] = source_id
-    return cats, series
+    """Fetch series categories and list from all Xtream sources."""
+    all_cats: list[dict] = []
+    all_series: list[dict] = []
+    for source in get_sources():
+        if source.type != "xtream":
+            continue
+        try:
+            client = XtreamClient(source.url, source.username, source.password)
+            cats = client.get_series_categories()
+            series = client.get_series()
+            # Tag with source_id for playback and access control
+            for c in cats:
+                c["source_id"] = source.id
+            for s in series:
+                s["source_id"] = source.id
+            all_cats.extend(cats)
+            all_series.extend(series)
+        except Exception as e:
+            log.warning("Failed to fetch series from source %s: %s", source.id, e)
+    return all_cats, all_series
 
 
 def load_series_data() -> tuple[list[dict], list[dict]]:
@@ -362,6 +385,14 @@ def get_first_xtream_client() -> XtreamClient | None:
     """Get the first available Xtream client (for VOD/series)."""
     for source in get_sources():
         if source.type == "xtream":
+            return XtreamClient(source.url, source.username, source.password)
+    return None
+
+
+def get_xtream_client_by_source(source_id: str) -> XtreamClient | None:
+    """Get Xtream client for a specific source ID."""
+    for source in get_sources():
+        if source.id == source_id and source.type == "xtream":
             return XtreamClient(source.url, source.username, source.password)
     return None
 
