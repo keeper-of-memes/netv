@@ -12,6 +12,13 @@
 .desktop-only { display: flex; }
 .desktop-only-block { display: block; }
 
+/* Performance: contain layout recalculations to each row */
+.guide-row {
+  contain: layout style paint;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 4rem; /* approximate row height */
+}
+
 /* Mobile (width < 512px): show compact-only, hide desktop-only */
 @media (max-width: 511px) {
   .guide-container .compact-only { display: flex; }
@@ -120,7 +127,7 @@
 
     <!-- Channel Rows -->
     {% for row in grid_data %}
-    <div class="flex border-b border-gray-700 hover:bg-gray-750" data-row="{{ loop.index0 }}">
+    <div class="guide-row flex border-b border-gray-700 hover:bg-gray-750" data-row="{{ loop.index0 }}">
       <!-- Mobile Channel Info -->
       <div class="compact-only w-32 flex-shrink-0 p-1 items-center bg-gray-800 sticky left-0 z-10 border-r border-gray-700">
         <a href="/play/live/{{ row.channel.stream_id }}"
@@ -172,7 +179,7 @@
         {% for prog in row.programs %}
         <a href="/play/live/{{ row.channel.stream_id }}"
            class="absolute top-1 bottom-1 bg-gray-700 hover:bg-gray-600 rounded px-2 py-1 overflow-hidden
-                  focusable transition-transform border-2 border-transparent focus:border-blue-500 focus:bg-blue-900/50"
+                  focusable border-2 border-transparent focus:border-blue-500 focus:bg-blue-900/50"
            style="left: {{ prog.left_pct }}%; width: calc({{ prog.width_pct }}% - 4px);"
            tabindex="0" data-nav="epg" data-row="{{ row_idx }}" data-col="{{ loop.index0 }}"
            title="{{ prog.title }}&#10;{{ prog.start }} - {{ prog.end }}&#10;{{ prog.desc }}">
