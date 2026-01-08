@@ -114,6 +114,7 @@ APT_PACKAGES=(
     libopus-dev
     libsdl2-dev
     libtool
+    python3-jinja2
     libunistring-dev
     libva-dev
     libvdpau-dev

@@ -101,6 +101,7 @@ RUN apt-get update && apt-get install -y \
     libopus-dev \
     libsdl2-dev \
     libtool \
+    python3-jinja2 \
     libva-dev \
     libvdpau-dev \
     libvorbis-dev \
