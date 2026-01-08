@@ -1,10 +1,6 @@
-# FFmpeg base image with hardware acceleration (NVENC, VAAPI, QSV)
-# Built with latest FFmpeg snapshot
-# Used as base for netv application image
+# FFmpeg Docker image with hardware acceleration (NVENC, VAAPI, QSV)
 #
-# GOAL: Build the most widely-applicable hardware-accelerated FFmpeg possible.
-# The resulting binary should run on the widest range of NVIDIA GPUs while
-# also supporting Intel QSV and AMD VAAPI.
+# Uses install-ffmpeg.sh as single source of truth for build configuration.
 #
 # NVIDIA GPU compatibility:
 #   FFmpeg compiles CUDA code to PTX (parallel thread execution) assembly,
@@ -15,34 +11,16 @@
 #   from Maxwell through Blackwell and beyond. The only cost is JIT compilation
 #   on first run (cached by driver for subsequent runs).
 #
-#   We use the lowest supported arch (sm_52 for CUDA <13, sm_75 for CUDA 13+)
-#   to maximize compatibility.
-#
-# Ubuntu 24.04 apt packages vs upstream (checked 2026-01)
-# Sorted by staleness (most stale first)
-#
-#   Package      | Apt Version | Latest  | Status
-#   -------------|-------------|---------|----------------------------------
-#   libsvtav1    | 1.7.0       | 3.0.0   | 2 major behind - build from source
-#   libx265      | 3.5         | 4.1     | 1 major behind - build from source
-#   libaom       | 3.8.2       | 3.13.1  | 5 minor behind - build from source
-#   libvpl       | 2023.3.0    | 2.16.0  | old API - build from source
-#   libwebp      | 1.3.2       | 1.6.0   | 3 minor behind - build from source
-#   libdav1d     | 1.4.1       | 1.5.0   | 1 minor behind - build from source
-#   libopus      | 1.4         | 1.5.2   | 1 minor behind
-#   libvpx       | 1.14.1      | 1.15.0  | 1 minor behind
-#   libass       | 0.17.1      | 0.17.3  | 2 patch behind
-#   nasm         | 2.16.01     | 2.16.03 | 2 patch behind
-#   libfdk-aac   | 2.0.2       | 2.0.3   | 1 patch behind
-#   libfreetype  | 2.13.2      | 2.13.3  | 1 patch behind
-#   libx264      | 0.164       | 0.164   | current
-#   libvorbis    | 1.3.7       | 1.3.7   | current
-#   libmp3lame   | 3.100       | 3.100   | current
-#   libfontconfig| 2.15.0      | 2.15.0  | current
+#   For Docker builds, we use NVCC_GENCODE=minimum (sm_52 for CUDA <13, sm_75 for CUDA 13+)
+#   to maximize GPU compatibility. For local builds, install-ffmpeg.sh defaults to
+#   NVCC_GENCODE=native for best performance on the build machine.
 
+# =============================================================================
+# Builder stage: compile FFmpeg using install-ffmpeg.sh
+# =============================================================================
 FROM ubuntu:24.04 AS builder
 
-# Build options (set to 0 to disable)
+# Build configuration - these are passed to install-ffmpeg.sh via environment
 ARG BUILD_NVIDIA=1
 ARG BUILD_LIBPLACEBO=1
 ARG BUILD_X265=1
@@ -50,380 +28,40 @@ ARG BUILD_LIBAOM=1
 ARG BUILD_LIBWEBP=1
 ARG BUILD_LIBVPL=1
 ARG BUILD_LIBDAV1D=1
+ARG BUILD_LIBSVTAV1=1
+ARG BUILD_LIBVMAF=1
 ARG FFMPEG_VERSION=snapshot
-ARG VULKAN_SDK_VERSION=1.4.328.1
-# CUDA_VERSION: specify like "12-9", "13-0", etc. Use "auto" to auto-detect latest.
 ARG CUDA_VERSION=12-9
-# NVCC_GENCODE options:
-#   "minimum"   - (default) lowest arch for CUDA version (sm_52 for <13, sm_75 for 13+)
-#   "native"    - compiles for build machine's GPU only
-#   "75"        - explicit single arch (e.g., 75, 86, 89)
 ARG NVCC_GENCODE=minimum
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV FFMPEG_BUILD=/opt/ffmpeg_build
-ENV PATH="/opt/bin:$PATH"
+# Override install-ffmpeg.sh paths for container
+ENV SRC_DIR=/src
+ENV BUILD_DIR=/opt/ffmpeg_build
+ENV BIN_DIR=/opt/bin
+# Pass build args to script via env
+ENV BUILD_NVIDIA=${BUILD_NVIDIA}
+ENV BUILD_LIBPLACEBO=${BUILD_LIBPLACEBO}
+ENV BUILD_X265=${BUILD_X265}
+ENV BUILD_LIBAOM=${BUILD_LIBAOM}
+ENV BUILD_LIBWEBP=${BUILD_LIBWEBP}
+ENV BUILD_LIBVPL=${BUILD_LIBVPL}
+ENV BUILD_LIBDAV1D=${BUILD_LIBDAV1D}
+ENV BUILD_LIBSVTAV1=${BUILD_LIBSVTAV1}
+ENV BUILD_LIBVMAF=${BUILD_LIBVMAF}
+ENV FFMPEG_VERSION=${FFMPEG_VERSION}
+ENV CUDA_VERSION=${CUDA_VERSION}
+ENV NVCC_GENCODE=${NVCC_GENCODE}
 
-# Build timestamp for cache busting and tracking
-ARG BUILD_DATE
-LABEL org.opencontainers.image.created="${BUILD_DATE}"
-LABEL org.opencontainers.image.description="FFmpeg with NVENC, VAAPI, QSV support"
+# Install sudo (install-ffmpeg.sh uses it, works as no-op when root)
+RUN apt-get update && apt-get install -y sudo
 
-WORKDIR /src
-
-# NVIDIA CUDA setup
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    if [ "$BUILD_NVIDIA" = "1" ]; then \
-        apt-get update && apt-get install -y wget gnupg && \
-        wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb && \
-        dpkg -i cuda-keyring_1.1-1_all.deb && \
-        rm cuda-keyring_1.1-1_all.deb && \
-        apt-get update; \
-    fi
-
-# Detect CUDA version and install
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    if [ "$BUILD_NVIDIA" = "1" ]; then \
-        if [ -z "$CUDA_VERSION" ] || [ "$CUDA_VERSION" = "auto" ]; then \
-            CUDA_VERSION=$(apt-cache search '^cuda-nvcc-[0-9]' | sed 's/cuda-nvcc-//' | cut -d' ' -f1 | sort -V | tail -1); \
-        fi && \
-        echo "Installing CUDA version: $CUDA_VERSION" && \
-        apt-get update && \
-        apt-get install -y cuda-nvcc-$CUDA_VERSION cuda-cudart-dev-$CUDA_VERSION libffmpeg-nvenc-dev && \
-        # Convert 12-6 to 12.6 for directory path and create symlink \
-        CUDA_VERSION_DOT=$(echo "$CUDA_VERSION" | tr '-' '.') && \
-        ln -sf "/usr/local/cuda-${CUDA_VERSION_DOT}" /usr/local/cuda && \
-        ls -la /usr/local/cuda/bin/nvcc && \
-        echo "/usr/local/cuda" > /tmp/cuda_path && \
-        echo "$CUDA_VERSION" > /tmp/cuda_version; \
-    else \
-        echo "" > /tmp/cuda_path && \
-        echo "" > /tmp/cuda_version; \
-    fi
-
-# Compute NVCC flags early (fail fast if misconfigured)
-#
-# Minimum arch by CUDA version:
-#   CUDA <13:  sm_52 (Maxwell) - supports GTX 900 series and up
-#   CUDA 13+:  sm_75 (Turing)  - Maxwell/Pascal/Volta deprecated
-#
-# FFmpeg compiles CUDA to PTX which is forward-compatible, so minimum arch
-# gives maximum GPU compatibility via runtime JIT compilation.
-RUN if [ "$BUILD_NVIDIA" = "1" ]; then \
-        CUDA_VER=$(cat /tmp/cuda_version) && \
-        CUDA_MAJOR="${CUDA_VER%%-*}" && \
-        if [ "$NVCC_GENCODE" = "minimum" ]; then \
-            if [ "$CUDA_MAJOR" -ge 13 ]; then \
-                NVCC_ARCH="-arch=sm_75"; \
-            else \
-                NVCC_ARCH="-arch=sm_52"; \
-            fi; \
-        elif [ "$NVCC_GENCODE" = "native" ]; then \
-            NVCC_ARCH="-arch=native"; \
-        else \
-            NVCC_ARCH="-arch=sm_$NVCC_GENCODE"; \
-        fi && \
-        echo "CUDA $CUDA_VER NVCC_GENCODE=$NVCC_GENCODE -> $NVCC_ARCH" && \
-        echo "$NVCC_ARCH" > /tmp/nvcc_flags && \
-        # Test nvcc with -ptx (like ffmpeg configure does) \
-        export PATH="/usr/local/cuda/bin:$PATH" && \
-        echo 'extern "C" __global__ void test() {}' > /tmp/test.cu && \
-        nvcc $NVCC_ARCH -ptx /tmp/test.cu -o /tmp/test.ptx && \
-        echo "NVCC test passed" && \
-        rm -f /tmp/test.cu /tmp/test.ptx; \
-    else \
-        echo "" > /tmp/nvcc_flags; \
-    fi
-
-# Install build dependencies (stale packages built from source: x265, libaom, libwebp, libvpl)
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y \
-    autoconf \
-    automake \
-    build-essential \
-    cmake \
-    git \
-    meson \
-    nasm \
-    ninja-build \
-    pkg-config \
-    texinfo \
-    wget \
-    yasm \
-    libass-dev \
-    libfdk-aac-dev \
-    libfontconfig1-dev \
-    libfreetype6-dev \
-    libsoxr-dev \
-    libsrt-openssl-dev \
-    libssl-dev \
-    libunistring-dev \
-    libzimg-dev \
-    liblzma-dev \
-    liblzo2-dev \
-    libmp3lame-dev \
-    libnuma-dev \
-    libopus-dev \
-    libsdl2-dev \
-    libtool \
-    python3-jinja2 \
-    libva-dev \
-    libvdpau-dev \
-    libvorbis-dev \
-    libvpx-dev \
-    libx264-dev \
-    libxcb-shm0-dev \
-    libxcb-xfixes0-dev \
-    libxcb1-dev \
-    zlib1g-dev
-
-# Install apt -dev packages for libraries not being built from source
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    APT_PKGS="" && \
-    [ "$BUILD_X265" != "1" ] && APT_PKGS="$APT_PKGS libx265-dev" ; \
-    [ "$BUILD_LIBAOM" != "1" ] && APT_PKGS="$APT_PKGS libaom-dev" ; \
-    [ "$BUILD_LIBWEBP" != "1" ] && APT_PKGS="$APT_PKGS libwebp-dev" ; \
-    [ "$BUILD_LIBVPL" != "1" ] && APT_PKGS="$APT_PKGS libvpl-dev" ; \
-    [ "$BUILD_LIBDAV1D" != "1" ] && APT_PKGS="$APT_PKGS libdav1d-dev" ; \
-    if [ -n "$APT_PKGS" ]; then apt-get update && apt-get install -y $APT_PKGS; fi
-
-# Download Vulkan SDK (tarball - apt packages deprecated)
-RUN if [ "$BUILD_LIBPLACEBO" = "1" ]; then \
-        wget -O vulkansdk.tar.xz "https://sdk.lunarg.com/sdk/download/${VULKAN_SDK_VERSION}/linux/vulkansdk-linux-x86_64-${VULKAN_SDK_VERSION}.tar.xz" && \
-        tar xf vulkansdk.tar.xz && \
-        mv "${VULKAN_SDK_VERSION}" vulkan-sdk && \
-        rm vulkansdk.tar.xz && \
-        echo "/src/vulkan-sdk/x86_64" > /tmp/vulkan_sdk_path; \
-    else \
-        echo "" > /tmp/vulkan_sdk_path; \
-    fi
-
-# libx265 (H.265/HEVC encoder - apt 3.5 is stale, latest 4.1)
-# Note: x265's cmake doesn't reliably install x265.pc, so we create it manually
-RUN if [ "$BUILD_X265" = "1" ]; then \
-        git clone --depth 1 https://bitbucket.org/multicoreware/x265_git.git && \
-        cd x265_git/build/linux && \
-        cmake -G "Unix Makefiles" \
-            -DCMAKE_INSTALL_PREFIX=$FFMPEG_BUILD \
-            -DLIB_INSTALL_DIR=$FFMPEG_BUILD/lib \
-            -DENABLE_SHARED=off \
-            ../../source && \
-        make -j$(nproc) && \
-        make install && \
-        mkdir -p $FFMPEG_BUILD/lib/pkgconfig && \
-        printf '%s\n' \
-            'prefix=/opt/ffmpeg_build' \
-            'exec_prefix=${prefix}' \
-            'libdir=${exec_prefix}/lib' \
-            'includedir=${prefix}/include' \
-            '' \
-            'Name: x265' \
-            'Description: H.265/HEVC video encoder' \
-            'Version: 4.1' \
-            'Libs: -L${libdir} -lx265' \
-            'Libs.private: -lstdc++ -lm -lrt -ldl -lnuma -lpthread' \
-            'Cflags: -I${includedir}' \
-            > $FFMPEG_BUILD/lib/pkgconfig/x265.pc; \
-    fi
-
-# libaom (AV1 reference codec - apt 3.8 is stale, latest 3.13)
-RUN if [ "$BUILD_LIBAOM" = "1" ]; then \
-        git clone --depth 1 https://aomedia.googlesource.com/aom && \
-        mkdir -p aom_build && \
-        cd aom_build && \
-        cmake -G "Unix Makefiles" \
-            -DCMAKE_INSTALL_PREFIX=$FFMPEG_BUILD \
-            -DENABLE_TESTS=OFF \
-            -DENABLE_NASM=on \
-            -DBUILD_SHARED_LIBS=OFF \
-            ../aom && \
-        make -j$(nproc) && \
-        make install; \
-    fi
-
-# libwebp (WebP image codec - apt 1.3 is stale, latest 1.6)
-RUN if [ "$BUILD_LIBWEBP" = "1" ]; then \
-        git clone --depth 1 https://chromium.googlesource.com/webm/libwebp && \
-        cd libwebp && \
-        ./autogen.sh && \
-        ./configure --prefix=$FFMPEG_BUILD --disable-shared --enable-static && \
-        make -j$(nproc) && \
-        make install; \
-    fi
-
-# libvpl (Intel QuickSync - apt 2023.3 is stale, latest 2.16)
-RUN if [ "$BUILD_LIBVPL" = "1" ]; then \
-        git clone --depth 1 https://github.com/intel/libvpl.git && \
-        mkdir -p libvpl/build && \
-        cd libvpl/build && \
-        cmake -G "Unix Makefiles" \
-            -DCMAKE_INSTALL_PREFIX=$FFMPEG_BUILD \
-            -DBUILD_SHARED_LIBS=OFF \
-            .. && \
-        make -j$(nproc) && \
-        make install; \
-    fi
-
-# libdav1d (AV1 decoder - apt 1.4.1 is stale, latest 1.5.0)
-RUN if [ "$BUILD_LIBDAV1D" = "1" ]; then \
-        git clone --depth 1 https://code.videolan.org/videolan/dav1d.git && \
-        cd dav1d && \
-        meson setup build \
-            --buildtype=release \
-            --default-library=static \
-            --prefix=$FFMPEG_BUILD \
-            --libdir=$FFMPEG_BUILD/lib && \
-        ninja -C build && \
-        ninja -C build install; \
-    fi
-
-# nv-codec-headers (for NVIDIA hardware encoding)
-RUN if [ "$BUILD_NVIDIA" = "1" ]; then \
-        git clone --depth 1 https://git.videolan.org/git/ffmpeg/nv-codec-headers.git && \
-        cd nv-codec-headers && \
-        make && \
-        make PREFIX=$FFMPEG_BUILD install; \
-    fi
-
-# SVT-AV1 (AV1 encoder)
-RUN git clone --depth 1 https://gitlab.com/AOMediaCodec/SVT-AV1.git && \
-    mkdir -p SVT-AV1/build && \
-    cd SVT-AV1/build && \
-    cmake -G "Unix Makefiles" \
-        -DCMAKE_INSTALL_PREFIX=$FFMPEG_BUILD \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DBUILD_DEC=OFF \
-        -DBUILD_SHARED_LIBS=OFF .. && \
-    make -j$(nproc) && \
-    make install
-
-# libvmaf (latest)
-RUN git clone --depth 1 https://github.com/Netflix/vmaf && \
-    mkdir -p vmaf/libvmaf/build && \
-    cd vmaf/libvmaf/build && \
-    meson setup \
-        -Denable_tests=false \
-        -Denable_docs=false \
-        --buildtype=release \
-        --default-library=static \
-        --prefix=$FFMPEG_BUILD \
-        --libdir=$FFMPEG_BUILD/lib \
-        .. && \
-    ninja && \
-    ninja install
-
-# libplacebo (for GPU tone mapping)
-RUN if [ "$BUILD_LIBPLACEBO" = "1" ]; then \
-        VULKAN_SDK=$(cat /tmp/vulkan_sdk_path) && \
-        export PATH="$VULKAN_SDK/bin:$PATH" && \
-        export PKG_CONFIG_PATH="$VULKAN_SDK/lib/pkgconfig:$PKG_CONFIG_PATH" && \
-        # Use static shaderc (avoid runtime .so dependency) \
-        cp "$VULKAN_SDK/lib/pkgconfig/shaderc_combined.pc" "$VULKAN_SDK/lib/pkgconfig/shaderc.pc" && \
-        git clone --depth 1 https://code.videolan.org/videolan/libplacebo.git && \
-        cd libplacebo && \
-        meson setup build \
-            --buildtype=release \
-            --default-library=static \
-            --prefer-static \
-            -Dvulkan=enabled \
-            -Dvulkan-registry="$VULKAN_SDK/share/vulkan/registry/vk.xml" \
-            -Dopengl=disabled \
-            -Dd3d11=disabled \
-            -Ddemos=false \
-            --prefix=$FFMPEG_BUILD \
-            --libdir=$FFMPEG_BUILD/lib && \
-        ninja -C build && \
-        ninja -C build install; \
-    fi
-
-# FFmpeg (snapshot or release)
-RUN if [ "$FFMPEG_VERSION" = "snapshot" ]; then \
-        wget -O ffmpeg.tar.bz2 https://ffmpeg.org/releases/ffmpeg-snapshot.tar.bz2 && \
-        tar xjf ffmpeg.tar.bz2 && \
-        rm ffmpeg.tar.bz2; \
-    else \
-        wget -O ffmpeg.tar.xz https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz && \
-        tar xJf ffmpeg.tar.xz && \
-        mv ffmpeg-${FFMPEG_VERSION} ffmpeg && \
-        rm ffmpeg.tar.xz; \
-    fi
-
-# Build FFmpeg
-RUN CUDA_PATH=$(cat /tmp/cuda_path) && \
-    VULKAN_SDK=$(cat /tmp/vulkan_sdk_path) && \
-    # Set PATH for CUDA before anything else \
-    if [ -n "$CUDA_PATH" ]; then export PATH="$CUDA_PATH/bin:$PATH"; fi && \
-    cd ffmpeg && \
-    # Build flags \
-    EXTRA_CFLAGS="-I$FFMPEG_BUILD/include -O3" && \
-    EXTRA_LDFLAGS="-L$FFMPEG_BUILD/lib -s" && \
-    PKG_CONFIG_PATH="$FFMPEG_BUILD/lib/pkgconfig" && \
-    if [ -n "$CUDA_PATH" ]; then \
-        EXTRA_CFLAGS="$EXTRA_CFLAGS -I$CUDA_PATH/include"; \
-        EXTRA_LDFLAGS="$EXTRA_LDFLAGS -L$CUDA_PATH/lib64"; \
-        nvcc --version && which nvcc; \
-    fi && \
-    if [ -n "$VULKAN_SDK" ]; then \
-        EXTRA_CFLAGS="$EXTRA_CFLAGS -I$VULKAN_SDK/include"; \
-        EXTRA_LDFLAGS="$EXTRA_LDFLAGS -L$VULKAN_SDK/lib"; \
-        PKG_CONFIG_PATH="$PKG_CONFIG_PATH:$VULKAN_SDK/lib/pkgconfig"; \
-    fi && \
-    export PKG_CONFIG_PATH && \
-    # Base configure options \
-    CONFIGURE_OPTS=" \
-        --prefix=$FFMPEG_BUILD \
-        --bindir=/opt/bin \
-        --pkg-config-flags=--static \
-        --extra-cflags=\"$EXTRA_CFLAGS\" \
-        --extra-ldflags=\"$EXTRA_LDFLAGS\" \
-        --extra-libs=\"-lpthread -lm\" \
-        --ld=g++ \
-        --enable-gpl \
-        --enable-version3 \
-        --enable-openssl \
-        --enable-libaom \
-        --enable-libass \
-        --enable-libfdk-aac \
-        --enable-libfontconfig \
-        --enable-libfreetype \
-        --enable-libmp3lame \
-        --enable-libopus \
-        --enable-libsvtav1 \
-        --enable-libdav1d \
-        --enable-libvmaf \
-        --enable-libvorbis \
-        --enable-libvpx \
-        --enable-libwebp \
-        --enable-libx264 \
-        --enable-libx265 \
-        --enable-libzimg \
-        --enable-libsoxr \
-        --enable-libsrt \
-        --enable-vaapi \
-        --enable-libvpl \
-        --enable-nonfree" && \
-    # NVIDIA options (nvcc flags computed early in /tmp/nvcc_flags) \
-    if [ "$BUILD_NVIDIA" = "1" ]; then \
-        CONFIGURE_OPTS="$CONFIGURE_OPTS --enable-cuda-nvcc --enable-nvenc --enable-cuvid"; \
-        NVCC_FLAGS=$(cat /tmp/nvcc_flags); \
-        if [ -n "$NVCC_FLAGS" ]; then \
-            CONFIGURE_OPTS="$CONFIGURE_OPTS --nvccflags=\"$NVCC_FLAGS\""; \
-        fi; \
-    fi && \
-    # libplacebo options \
-    if [ "$BUILD_LIBPLACEBO" = "1" ]; then \
-        CONFIGURE_OPTS="$CONFIGURE_OPTS --enable-vulkan --enable-libplacebo"; \
-    fi && \
-    eval ./configure $CONFIGURE_OPTS && \
-    make -j$(nproc) && \
-    make install
+# Copy and run the build script
+COPY tools/install-ffmpeg.sh /tmp/
+RUN chmod +x /tmp/install-ffmpeg.sh && /tmp/install-ffmpeg.sh
 
 # =============================================================================
-# Final image: Runtime with FFmpeg binaries
+# Runtime stage: minimal image with just FFmpeg binaries
 # =============================================================================
 FROM ubuntu:24.04
 
@@ -435,65 +73,37 @@ ARG BUILD_LIBAOM=1
 ARG BUILD_LIBWEBP=1
 ARG BUILD_LIBVPL=1
 ARG BUILD_LIBDAV1D=1
+ARG BUILD_LIBSVTAV1=1
+ARG BUILD_LIBVMAF=1
 
 LABEL org.opencontainers.image.created="${BUILD_DATE}"
 LABEL org.opencontainers.image.title="netv-ffmpeg"
-LABEL org.opencontainers.image.description="FFmpeg runtime with NVENC, VAAPI, QSV support"
+LABEL org.opencontainers.image.description="FFmpeg with NVENC, VAAPI, QSV hardware acceleration"
 LABEL org.opencontainers.image.version="${FFMPEG_VERSION}"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Runtime libraries for FFmpeg + hardware acceleration drivers
-# Note: x265, libaom, libwebp, libvpl, libdav1d are statically linked by default (built from source)
+# Runtime libraries for FFmpeg
+# Note: x265, libaom, libwebp, libvpl, libdav1d are statically linked when built from source
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-    # Core codec libs (apt versions used where not stale)
-    libass9 \
-    libfdk-aac2 \
-    libmp3lame0 \
-    libopus0 \
-    libvorbis0a \
-    libvorbisenc2 \
-    libvpx9 \
-    libx264-164 \
+    # Core codec libs
+    libass9 libfdk-aac2 libmp3lame0 libopus0 libvorbis0a libvorbisenc2 libvpx9 libx264-164 \
     # Text/font rendering
-    libfontconfig1 \
-    libfreetype6 \
+    libfontconfig1 libfreetype6 \
     # Audio/video processing
-    libsoxr0 \
-    libzimg2 \
-    libnuma1 \
+    libsoxr0 libzimg2 libnuma1 \
     # Network/crypto
-    libsrt1.5-openssl \
-    libssl3 \
+    libsrt1.5-openssl libssl3 \
     # X11/display
-    libxcb1 \
-    libxcb-shm0 \
-    libxcb-shape0 \
-    libxcb-xfixes0 \
-    libxv1 \
-    libx11-6 \
-    libxext6 \
+    libxcb1 libxcb-shm0 libxcb-shape0 libxcb-xfixes0 libxv1 libx11-6 libxext6 \
     # Hardware accel
-    libva2 \
-    libva-drm2 \
-    libva-x11-2 \
-    libvdpau1 \
-    intel-media-va-driver \
-    mesa-va-drivers \
+    libva2 libva-drm2 libva-x11-2 libvdpau1 intel-media-va-driver mesa-va-drivers \
     # Other deps
-    zlib1g \
-    libunistring5 \
-    liblzma5 \
-    liblzo2-2 \
-    libasound2t64 \
-    libdrm2 \
-    libsndio7.0 \
-    libsdl2-2.0-0 \
-    libpulse0
+    zlib1g libunistring5 liblzma5 liblzo2-2 libasound2t64 libdrm2 libsndio7.0 libsdl2-2.0-0 libpulse0
 
-# Install runtime libs for packages not built from source
+# Conditional runtime libs for apt-based packages (when not built from source)
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     APT_PKGS="" && \
@@ -502,6 +112,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     [ "$BUILD_LIBWEBP" != "1" ] && APT_PKGS="$APT_PKGS libwebp7 libwebpmux3" ; \
     [ "$BUILD_LIBVPL" != "1" ] && APT_PKGS="$APT_PKGS libvpl2" ; \
     [ "$BUILD_LIBDAV1D" != "1" ] && APT_PKGS="$APT_PKGS libdav1d7" ; \
+    [ "$BUILD_LIBSVTAV1" != "1" ] && APT_PKGS="$APT_PKGS libsvtav1enc1d1" ; \
+    [ "$BUILD_LIBVMAF" != "1" ] && APT_PKGS="$APT_PKGS libvmaf3" ; \
     [ "$BUILD_LIBPLACEBO" = "1" ] && APT_PKGS="$APT_PKGS libvulkan1" ; \
     if [ -n "$APT_PKGS" ]; then apt-get update && apt-get install -y --no-install-recommends $APT_PKGS; fi
 
@@ -509,12 +121,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 COPY --from=builder /opt/bin/ffmpeg /usr/local/bin/
 COPY --from=builder /opt/bin/ffprobe /usr/local/bin/
 
-# Verify dependencies
+# Verify all dependencies are satisfied
 RUN ldd /usr/local/bin/ffmpeg | grep -q "not found" && \
     { echo "Missing libraries:"; ldd /usr/local/bin/ffmpeg | grep "not found"; exit 1; } || \
-    echo "All ffmpeg dependencies satisfied"
+    echo "All FFmpeg dependencies satisfied"
 
-# Store version info
 RUN ffmpeg -version > /ffmpeg-version.txt
 
 CMD ["ffmpeg", "-version"]

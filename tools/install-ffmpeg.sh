@@ -36,9 +36,23 @@ BUILD_LIBAOM=${BUILD_LIBAOM:-1}          # AV1 reference codec (apt: 3.8, latest
 BUILD_LIBWEBP=${BUILD_LIBWEBP:-1}        # WebP image codec (apt: 1.3, latest: 1.6)
 BUILD_LIBVPL=${BUILD_LIBVPL:-1}          # Intel QuickSync (apt: 2023.3, latest: 2.16)
 BUILD_LIBDAV1D=${BUILD_LIBDAV1D:-1}      # AV1 decoder (apt: 1.4.1, latest: 1.5.0)
+BUILD_LIBSVTAV1=${BUILD_LIBSVTAV1:-1}    # AV1 encoder (apt: 1.7.0, latest: 3.0.0)
+BUILD_LIBVMAF=${BUILD_LIBVMAF:-1}        # Video quality metrics (apt: 2.3.1, latest: 3.0.0)
 
 # FFmpeg version: "snapshot" for latest git, or specific version like "7.1"
 FFMPEG_VERSION=${FFMPEG_VERSION:-snapshot}
+
+# NVIDIA CUDA setup
+# CUDA_VERSION options:
+#   "auto"    - (default) use installed CUDA if available, else install latest
+#   "12-9"    - explicit version (e.g., 12-9, 12-6, 13-0)
+CUDA_VERSION=${CUDA_VERSION:-auto}
+# NVIDIA CUDA flags
+# NVCC_GENCODE options:
+#   "native"  - (default) compile for build machine's GPU via nvidia-smi
+#   "minimum" - lowest arch for CUDA version (sm_52 for <13, sm_75 for 13+)
+#   "75"      - explicit single arch (e.g., 75, 86, 89)
+NVCC_GENCODE=${NVCC_GENCODE:-native}
 
 # Build paths
 SRC_DIR="${SRC_DIR:-$HOME/ffmpeg_sources}"
@@ -47,65 +61,9 @@ BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
 
 NPROC=$(nproc)
 
-# NVIDIA CUDA setup
-# CUDA_VERSION options:
-#   "auto"    - (default) use installed CUDA if available, else install latest
-#   "12-9"    - explicit version (e.g., 12-9, 12-6, 13-0)
-CUDA_VERSION=${CUDA_VERSION:-auto}
+mkdir -p "$SRC_DIR"
 
-if [ "$BUILD_NVIDIA" = "1" ]; then
-    # Check if CUDA is already installed
-    if [ "$CUDA_VERSION" = "auto" ]; then
-        if command -v nvcc &> /dev/null; then
-            # Extract version from nvcc (e.g., "12.9" -> "12-9")
-            NVCC_VERSION=$(nvcc --version | grep -oP 'release \K[0-9]+\.[0-9]+')
-            CUDA_VERSION=$(echo "$NVCC_VERSION" | tr '.' '-')
-            echo "Detected installed CUDA $NVCC_VERSION (using version $CUDA_VERSION)"
-        else
-            echo "No CUDA installed, will install latest from NVIDIA repo"
-        fi
-    fi
-
-    # Add CUDA repo if not present or if we need to install
-    if [ "$CUDA_VERSION" = "auto" ] || ! command -v nvcc &> /dev/null; then
-        if ! dpkg -l cuda-keyring 2>/dev/null | grep -q ^ii; then
-            wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
-            sudo dpkg -i cuda-keyring_1.1-1_all.deb
-            rm cuda-keyring_1.1-1_all.deb
-            sudo apt-get update
-        fi
-
-        # Get latest CUDA version if still auto
-        if [ "$CUDA_VERSION" = "auto" ]; then
-            CUDA_VERSION=$(apt-cache search '^cuda-nvcc-[0-9]' | sed 's/cuda-nvcc-//' | cut -d' ' -f1 | sort -V | tail -1)
-            if [ -z "$CUDA_VERSION" ]; then
-                echo "Error: No CUDA packages found. Install CUDA repo first or set CUDA_VERSION manually." >&2
-                exit 1
-            fi
-            echo "Will install latest CUDA version: $CUDA_VERSION"
-        fi
-    fi
-    echo "Using CUDA version: $CUDA_VERSION"
-
-    # Detect CUDA installation path
-    CUDA_VERSION_DOT=$(echo "$CUDA_VERSION" | tr '-' '.')
-    if [ -d "/usr/local/cuda" ]; then
-        CUDA_PATH="/usr/local/cuda"
-    elif [ -d "/usr/local/cuda-${CUDA_VERSION_DOT}" ]; then
-        CUDA_PATH="/usr/local/cuda-${CUDA_VERSION_DOT}"
-    else
-        echo "Warning: CUDA path not found, using /usr/local/cuda (headers may be missing)" >&2
-        CUDA_PATH="/usr/local/cuda"
-    fi
-    echo "Using CUDA path: $CUDA_PATH"
-fi
-
-# Vulkan SDK for libplacebo (tarball - apt packages deprecated)
-if [ "$BUILD_LIBPLACEBO" = "1" ]; then
-    VULKAN_SDK_VERSION=${VULKAN_SDK_VERSION:-1.4.328.1}
-    VULKAN_SDK_DIR="${SRC_DIR}/vulkan-sdk-${VULKAN_SDK_VERSION}"
-fi
-
+# Base packages (installed first, includes wget needed for CUDA repo setup)
 APT_PACKAGES=(
     autoconf
     automake
@@ -152,12 +110,106 @@ APT_PACKAGES=(
 [ "$BUILD_LIBWEBP" != "1" ] && APT_PACKAGES+=(libwebp-dev)
 [ "$BUILD_LIBVPL" != "1" ] && APT_PACKAGES+=(libvpl-dev)
 [ "$BUILD_LIBDAV1D" != "1" ] && APT_PACKAGES+=(libdav1d-dev)
-if [ "$BUILD_NVIDIA" = "1" ]; then
-    APT_PACKAGES+=(libffmpeg-nvenc-dev cuda-nvcc-$CUDA_VERSION cuda-cudart-dev-$CUDA_VERSION)
-fi
-sudo apt-get install -y "${APT_PACKAGES[@]}"
+[ "$BUILD_LIBSVTAV1" != "1" ] && APT_PACKAGES+=(libsvtav1enc-dev)
+[ "$BUILD_LIBVMAF" != "1" ] && APT_PACKAGES+=(libvmaf-dev)
+sudo apt-get update && sudo apt-get install -y "${APT_PACKAGES[@]}"
 
-mkdir -p "$SRC_DIR"
+
+CUDA_FLAGS=()
+NVCC_ARCH=""
+
+if [ "$BUILD_NVIDIA" = "1" ]; then
+    # Check if CUDA is already installed
+    if [ "$CUDA_VERSION" = "auto" ]; then
+        if command -v nvcc &> /dev/null; then
+            # Extract version from nvcc (e.g., "12.9" -> "12-9")
+            NVCC_VERSION=$(nvcc --version | grep -oP 'release \K[0-9]+\.[0-9]+')
+            CUDA_VERSION=$(echo "$NVCC_VERSION" | tr '.' '-')
+            echo "Detected installed CUDA $NVCC_VERSION (using version $CUDA_VERSION)"
+        else
+            echo "No CUDA installed, will install latest from NVIDIA repo"
+        fi
+    fi
+
+    # Add CUDA repo if not present or if we need to install
+    if [ "$CUDA_VERSION" = "auto" ] || ! command -v nvcc &> /dev/null; then
+        if ! dpkg -l cuda-keyring 2>/dev/null | grep -q ^ii; then
+            wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+            sudo dpkg -i cuda-keyring_1.1-1_all.deb
+            rm cuda-keyring_1.1-1_all.deb
+            sudo apt-get update
+        fi
+
+        # Get latest CUDA version if still auto
+        if [ "$CUDA_VERSION" = "auto" ]; then
+            CUDA_VERSION=$(apt-cache search '^cuda-nvcc-[0-9]' | sed 's/cuda-nvcc-//' | cut -d' ' -f1 | sort -V | tail -1)
+            if [ -z "$CUDA_VERSION" ]; then
+                echo "Error: No CUDA packages found. Install CUDA repo first or set CUDA_VERSION manually." >&2
+                exit 1
+            fi
+            echo "Will install latest CUDA version: $CUDA_VERSION"
+        fi
+    fi
+    echo "Using CUDA version: $CUDA_VERSION"
+
+    # Install CUDA packages
+    sudo apt-get install -y libffmpeg-nvenc-dev cuda-nvcc-$CUDA_VERSION cuda-cudart-dev-$CUDA_VERSION
+
+    # Detect CUDA installation path
+    CUDA_VERSION_DOT=$(echo "$CUDA_VERSION" | tr '-' '.')
+    if [ -d "/usr/local/cuda" ]; then
+        CUDA_PATH="/usr/local/cuda"
+    elif [ -d "/usr/local/cuda-${CUDA_VERSION_DOT}" ]; then
+        CUDA_PATH="/usr/local/cuda-${CUDA_VERSION_DOT}"
+    else
+        echo "Warning: CUDA path not found, using /usr/local/cuda (headers may be missing)" >&2
+        CUDA_PATH="/usr/local/cuda"
+    fi
+    echo "Using CUDA path: $CUDA_PATH"
+
+
+    CUDA_FLAGS=(--enable-cuda-nvcc --enable-nvenc --enable-cuvid)
+
+    CUDA_MAJOR="${CUDA_VERSION%%-*}"
+
+    if [ "$NVCC_GENCODE" = "native" ]; then
+        # Detect GPU compute capability
+        if command -v nvidia-smi &> /dev/null; then
+            COMPUTE_CAP=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1)
+            if [ -n "$COMPUTE_CAP" ]; then
+                COMPUTE_CAP_NUM=$(echo "$COMPUTE_CAP" | tr -d '.')
+                NVCC_ARCH="-arch=sm_${COMPUTE_CAP_NUM}"
+                echo "CUDA $CUDA_VERSION NVCC_GENCODE=native -> $NVCC_ARCH (detected via nvidia-smi)"
+            else
+                echo "Warning: nvidia-smi found but no GPU detected, falling back to minimum" >&2
+                NVCC_GENCODE="minimum"
+            fi
+        else
+            echo "Warning: nvidia-smi not found, falling back to minimum arch" >&2
+            NVCC_GENCODE="minimum"
+        fi
+    fi
+
+    if [ "$NVCC_GENCODE" = "minimum" ]; then
+        if [ "$CUDA_MAJOR" -ge 13 ]; then
+            NVCC_ARCH="-arch=sm_75"
+        else
+            NVCC_ARCH="-arch=sm_52"
+        fi
+        echo "CUDA $CUDA_VERSION NVCC_GENCODE=minimum -> $NVCC_ARCH"
+    elif [ "$NVCC_GENCODE" != "native" ]; then
+        # Explicit arch number
+        NVCC_ARCH="-arch=sm_$NVCC_GENCODE"
+        echo "CUDA $CUDA_VERSION NVCC_GENCODE=$NVCC_GENCODE -> $NVCC_ARCH"
+    fi
+
+    cd "$SRC_DIR" &&
+    git -C nv-codec-headers pull 2>/dev/null || (rm -rf nv-codec-headers && git clone --depth 1 https://git.videolan.org/git/ffmpeg/nv-codec-headers.git) &&
+    cd nv-codec-headers &&
+    make &&
+    make PREFIX="$BUILD_DIR" install
+fi
+
 
 # libx265 (H.265/HEVC encoder)
 # Note: x265's cmake doesn't reliably install x265.pc, so we create it manually
@@ -231,8 +283,37 @@ if [ "$BUILD_LIBDAV1D" = "1" ]; then
     ninja -C build install
 fi
 
-# Download Vulkan SDK tarball (apt packages deprecated May 2025)
+# libsvtav1 (AV1 encoder)
+if [ "$BUILD_LIBSVTAV1" = "1" ]; then
+    cd "$SRC_DIR" &&
+    git -C SVT-AV1 pull 2>/dev/null || (rm -rf SVT-AV1 && git clone --depth 1 https://gitlab.com/AOMediaCodec/SVT-AV1.git) &&
+    mkdir -p SVT-AV1/build &&
+    cd SVT-AV1/build &&
+    PATH="$BIN_DIR:$PATH" cmake -G "Unix Makefiles" -DCMAKE_INSTALL_PREFIX="$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release -DBUILD_DEC=OFF -DBUILD_SHARED_LIBS=OFF .. &&
+    PATH="$BIN_DIR:$PATH" make -j $NPROC &&
+    make install
+fi
+
+# libvmaf (video quality metrics)
+if [ "$BUILD_LIBVMAF" = "1" ]; then
+    cd "$SRC_DIR" &&
+    git -C vmaf pull 2>/dev/null || (rm -rf vmaf && git clone --depth 1 https://github.com/Netflix/vmaf) &&
+    mkdir -p vmaf/libvmaf/build &&
+    cd vmaf/libvmaf/build &&
+    if [ -f build.ninja ]; then
+        meson setup --reconfigure -Denable_tests=false -Denable_docs=false --buildtype=release --default-library=static '../' --prefix "$BUILD_DIR" --bindir="$BIN_DIR" --libdir="$BUILD_DIR/lib"
+    else
+        meson setup -Denable_tests=false -Denable_docs=false --buildtype=release --default-library=static '../' --prefix "$BUILD_DIR" --bindir="$BIN_DIR" --libdir="$BUILD_DIR/lib"
+    fi &&
+    ninja &&
+    ninja install
+fi
+
+# libplacebo (for GPU tone mapping)
 if [ "$BUILD_LIBPLACEBO" = "1" ]; then
+    # Download Vulkan SDK tarball (apt packages deprecated May 2025)
+    VULKAN_SDK_VERSION=${VULKAN_SDK_VERSION:-1.4.328.1}
+    VULKAN_SDK_DIR="${SRC_DIR}/vulkan-sdk-${VULKAN_SDK_VERSION}"
     if [ ! -d "$VULKAN_SDK_DIR" ]; then
         echo "Downloading Vulkan SDK $VULKAN_SDK_VERSION..."
         cd "$SRC_DIR"
@@ -246,42 +327,7 @@ if [ "$BUILD_LIBPLACEBO" = "1" ]; then
     export PATH="$VULKAN_SDK/bin:$PATH"
     export PKG_CONFIG_PATH="$VULKAN_SDK/lib/pkgconfig:$PKG_CONFIG_PATH"
     echo "Using Vulkan SDK: $VULKAN_SDK"
-fi
 
-# libsvtav1 (AV1 encoder)
-cd "$SRC_DIR" && \
-git -C SVT-AV1 pull 2>/dev/null || (rm -rf SVT-AV1 && git clone --depth 1 https://gitlab.com/AOMediaCodec/SVT-AV1.git) && \
-mkdir -p SVT-AV1/build && \
-cd SVT-AV1/build && \
-PATH="$BIN_DIR:$PATH" cmake -G "Unix Makefiles" -DCMAKE_INSTALL_PREFIX="$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release -DBUILD_DEC=OFF -DBUILD_SHARED_LIBS=OFF .. && \
-PATH="$BIN_DIR:$PATH" make -j $NPROC && \
-make install
-
-# libvmaf
-cd "$SRC_DIR" &&
-git -C vmaf pull 2>/dev/null || (rm -rf vmaf && git clone --depth 1 https://github.com/Netflix/vmaf) &&
-mkdir -p vmaf/libvmaf/build &&
-cd vmaf/libvmaf/build &&
-if [ -f build.ninja ]; then
-    meson setup --reconfigure -Denable_tests=false -Denable_docs=false --buildtype=release --default-library=static '../' --prefix "$BUILD_DIR" --bindir="$BIN_DIR" --libdir="$BUILD_DIR/lib"
-else
-    meson setup -Denable_tests=false -Denable_docs=false --buildtype=release --default-library=static '../' --prefix "$BUILD_DIR" --bindir="$BIN_DIR" --libdir="$BUILD_DIR/lib"
-fi &&
-ninja &&
-ninja install
-
-
-# nv-codec-headers (for NVIDIA hardware encoding)
-if [ "$BUILD_NVIDIA" = "1" ]; then
-    cd "$SRC_DIR" &&
-    git -C nv-codec-headers pull 2>/dev/null || (rm -rf nv-codec-headers && git clone --depth 1 https://git.videolan.org/git/ffmpeg/nv-codec-headers.git) &&
-    cd nv-codec-headers &&
-    make &&
-    make PREFIX="$BUILD_DIR" install
-fi
-
-# libplacebo (for GPU tone mapping)
-if [ "$BUILD_LIBPLACEBO" = "1" ]; then
     # Use static shaderc (avoid runtime .so dependency)
     if [ ! -f "$VULKAN_SDK/lib/pkgconfig/shaderc.pc.bak" ]; then
         cp "$VULKAN_SDK/lib/pkgconfig/shaderc.pc" "$VULKAN_SDK/lib/pkgconfig/shaderc.pc.bak"
@@ -298,52 +344,6 @@ if [ "$BUILD_LIBPLACEBO" = "1" ]; then
     fi &&
     ninja -C build &&
     ninja -C build install
-fi
-
-# NVIDIA CUDA flags
-# NVCC_GENCODE options:
-#   "native"  - (default) compile for build machine's GPU via nvidia-smi
-#   "minimum" - lowest arch for CUDA version (sm_52 for <13, sm_75 for 13+)
-#   "75"      - explicit single arch (e.g., 75, 86, 89)
-NVCC_GENCODE=${NVCC_GENCODE:-native}
-
-CUDA_FLAGS=()
-NVCC_ARCH=""
-if [ "$BUILD_NVIDIA" = "1" ]; then
-    CUDA_FLAGS=(--enable-cuda-nvcc --enable-nvenc --enable-cuvid)
-
-    CUDA_MAJOR="${CUDA_VERSION%%-*}"
-
-    if [ "$NVCC_GENCODE" = "native" ]; then
-        # Detect GPU compute capability
-        if command -v nvidia-smi &> /dev/null; then
-            COMPUTE_CAP=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1)
-            if [ -n "$COMPUTE_CAP" ]; then
-                COMPUTE_CAP_NUM=$(echo "$COMPUTE_CAP" | tr -d '.')
-                NVCC_ARCH="-arch=sm_${COMPUTE_CAP_NUM}"
-                echo "CUDA $CUDA_VERSION NVCC_GENCODE=native -> $NVCC_ARCH (detected via nvidia-smi)"
-            else
-                echo "Warning: nvidia-smi found but no GPU detected, falling back to minimum" >&2
-                NVCC_GENCODE="minimum"
-            fi
-        else
-            echo "Warning: nvidia-smi not found, falling back to minimum arch" >&2
-            NVCC_GENCODE="minimum"
-        fi
-    fi
-
-    if [ "$NVCC_GENCODE" = "minimum" ]; then
-        if [ "$CUDA_MAJOR" -ge 13 ]; then
-            NVCC_ARCH="-arch=sm_75"
-        else
-            NVCC_ARCH="-arch=sm_52"
-        fi
-        echo "CUDA $CUDA_VERSION NVCC_GENCODE=minimum -> $NVCC_ARCH"
-    elif [ "$NVCC_GENCODE" != "native" ]; then
-        # Explicit arch number
-        NVCC_ARCH="-arch=sm_$NVCC_GENCODE"
-        echo "CUDA $CUDA_VERSION NVCC_GENCODE=$NVCC_GENCODE -> $NVCC_ARCH"
-    fi
 fi
 
 # ffmpeg
@@ -421,8 +421,12 @@ if [ -n "$NVCC_ARCH" ]; then
     CONFIGURE_CMD+=(--nvccflags="$NVCC_ARCH")
 fi
 
-PATH="$BIN_DIR:$PATH" PKG_CONFIG_PATH="$BUILD_DIR/lib/pkgconfig:$PKG_CONFIG_PATH" "${CONFIGURE_CMD[@]}" && \
-PATH="$BIN_DIR:$PATH" make -j $NPROC && \
+# Build PATH: include CUDA bin if NVIDIA enabled
+BUILD_PATH="$BIN_DIR:$PATH"
+[ "$BUILD_NVIDIA" = "1" ] && BUILD_PATH="$CUDA_PATH/bin:$BUILD_PATH"
+
+PATH="$BUILD_PATH" PKG_CONFIG_PATH="$BUILD_DIR/lib/pkgconfig:$PKG_CONFIG_PATH" "${CONFIGURE_CMD[@]}" && \
+PATH="$BUILD_PATH" make -j $NPROC && \
 make install && \
 hash -r
 
