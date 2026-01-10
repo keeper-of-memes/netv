@@ -1,9 +1,20 @@
 name: CI
 
 on:
+  workflow_dispatch:  # Manual trigger
   push:
     branches: [main]
+    paths-ignore:
+      # Don't trigger on ffmpeg changes - workflow_run will handle that
+      - "Dockerfile.ffmpeg"
+      - "tools/install-ffmpeg.sh"
+      - ".github/workflows/ffmpeg-base.yml"
   pull_request:
+    branches: [main]
+  workflow_run:
+    # Trigger after ffmpeg-base completes to pick up new ffmpeg image
+    workflows: ["FFmpeg Base Image"]
+    types: [completed]
     branches: [main]
 
 env:
@@ -14,8 +25,13 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Skip if triggered by failed ffmpeg workflow
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # For workflow_run, checkout the commit that triggered ffmpeg build
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -46,6 +62,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3

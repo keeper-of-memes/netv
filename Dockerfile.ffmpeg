@@ -100,23 +100,55 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
     # Core codec libs
-    libass9 libbluray2 libfdk-aac2 libmp3lame0 libopus0 libvorbis0a libvorbisenc2 libvpx9 \
+    libass9 \
+    libbluray2 \
+    libfdk-aac2 \
+    libmp3lame0 \
+    libopus0 \
+    libvorbis0a \
+    libvorbisenc2 \
+    libvpx9 \
     # Text/font rendering
-    libfontconfig1 libfreetype6 libfribidi0 libharfbuzz0b \
+    libfontconfig1 \
+    libfreetype6 \
+    libfribidi0 \
+    libharfbuzz0b \
     # Audio/video processing
-    librubberband2 libsoxr0 libvidstab1.1 libzimg2 libnuma1 \
+    librubberband2 \
+    libsoxr0 \
+    libvidstab1.1 \
+    libzimg2 \
+    libnuma1 \
     # Network/crypto
-    libsrt1.5-openssl libssl3 \
+    libsrt1.5-openssl \
+    libssl3 \
     # X11/display
-    libxcb1 libxcb-shm0 libxcb-shape0 libxcb-xfixes0 libxv1 libx11-6 libxext6 \
+    libxcb1 \
+    libxcb-shm0 \
+    libxcb-shape0 \
+    libxcb-xfixes0 \
+    libxv1 \
+    libx11-6 \
+    libxext6 \
     # Hardware accel:
     # - NVENC/CUDA: provided by nvidia-container-toolkit from host (no pkg needed)
     # - VAAPI: intel-media-va-driver (Intel), mesa-va-drivers (AMD), libva from source (below)
     # - OpenCL: ocl-icd-libopencl1 (ICD loader), backend from host (NVIDIA) or mesa-opencl-icd (AMD)
     # - Vulkan: libvulkan1 (conditional below), driver from host
-    libvdpau1 intel-media-va-driver mesa-va-drivers ocl-icd-libopencl1 \
+    libvdpau1 \
+    intel-media-va-driver \
+    mesa-va-drivers \
+    ocl-icd-libopencl1 \
     # Other deps
-    zlib1g libunistring5 liblzma5 liblzo2-2 libasound2t64 libdrm2 libsndio7.0 libsdl2-2.0-0 libpulse0
+    zlib1g \
+    libunistring5 \
+    liblzma5 \
+    liblzo2-2 \
+    libasound2t64 \
+    libdrm2 \
+    libsndio7.0 \
+    libsdl2-2.0-0 \
+    libpulse0
 
 # Conditional runtime libs for apt-based packages (when not built from source)
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -131,13 +163,19 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     [ "$BUILD_LIBVMAF" != "1" ] && APT_PKGS="$APT_PKGS libvmaf3" ; \
     [ "$BUILD_LIBPLACEBO" = "1" ] && APT_PKGS="$APT_PKGS libvulkan1" ; \
     [ "$BUILD_LIBVA" != "1" ] && APT_PKGS="$APT_PKGS libva2 libva-drm2 libva-x11-2" ; \
+    [ "$BUILD_LIBJXL" = "1" ] && APT_PKGS="$APT_PKGS libbrotli1 libhwy1t64" ; \
     [ "$BUILD_LIBJXL" != "1" ] && APT_PKGS="$APT_PKGS libjxl0.7" ; \
     [ "$BUILD_LIBX264" != "1" ] && APT_PKGS="$APT_PKGS libx264-164" ; \
     if [ -n "$APT_PKGS" ]; then apt-get update && apt-get install -y --no-install-recommends $APT_PKGS; fi
 
+# Tell libva where to find system drivers (intel-media-va-driver, mesa-va-drivers)
+# Our libva is built with prefix=/opt/ffmpeg_build but drivers are system-installed
+ENV LIBVA_DRIVERS_PATH=/usr/lib/x86_64-linux-gnu/dri
+
 # Copy FFmpeg binaries from builder
 COPY --from=builder /opt/bin/ffmpeg /usr/local/bin/
 COPY --from=builder /opt/bin/ffprobe /usr/local/bin/
+COPY --from=builder /opt/bin/ffplay /usr/local/bin/
 
 # Copy built libva if compiled from source (for Intel Xe kernel driver support)
 # libva needs to be in /opt/lib to match the rpath embedded in ffmpeg binary
