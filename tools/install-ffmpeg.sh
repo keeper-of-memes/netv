@@ -1,5 +1,6 @@
 #!/bin/bash
-# Build ffmpeg from source with NVIDIA NVENC support
+# Build ffmpeg from source with hardware acceleration support
+# Supports: NVIDIA NVENC, AMD AMF, Intel QSV/VAAPI, LibTorch DNN
 # https://trac.ffmpeg.org/wiki/CompilationGuide/Ubuntu
 set -e
 
@@ -132,8 +133,27 @@ set -e
 #
 # =============================================================================
 
+# Hardware acceleration (set to 1 to enable)
+ENABLE_NVIDIA_CUDA=${ENABLE_NVIDIA_CUDA:-1}  # NVENC/NVDEC hardware encoding/decoding
+ENABLE_AMD_AMF=${ENABLE_AMD_AMF:-1}          # AMD AMF hardware encoding (requires AMD GPU)
+ENABLE_TORCH=${ENABLE_TORCH:-1}              # LibTorch DNN backend for AI filters
+
+# LibTorch CUDA variant (only used if ENABLE_TORCH=1)
+# LIBTORCH_VARIANT options:
+#   "cu124"   - (default) CUDA 12.4 - required for FFmpeg compatibility (initXPU API)
+#               Note: cu124 binaries work on CUDA 12.4+ runtimes (forward compatible)
+#   "auto"    - auto-detect from CUDA_VERSION, rounding minor to nearest even
+#               (PyTorch only releases cu126, cu128, cu130 - even minor versions)
+#               Examples: CUDA 12.9 -> cu128, CUDA 12.7 -> cu126, CUDA 13.x -> cu130
+#               WARNING: auto may select LibTorch 2.6.0+ which breaks FFmpeg (initXPU->init rename)
+#   "cpu"     - CPU-only (no GPU acceleration for DNN filters)
+#   "cu126"   - force CUDA 12.6
+#   "cu128"   - force CUDA 12.8
+#   "cu130"   - force CUDA 13.0
+#   "rocm6.4" - AMD ROCm 6.4 (requires ROCm installed on host)
+LIBTORCH_VARIANT=${LIBTORCH_VARIANT:-cu124}
+
 # Optional build components (set to 0 to use apt package instead)
-BUILD_NVIDIA=${BUILD_NVIDIA:-1}          # NVENC/NVDEC hardware encoding/decoding
 BUILD_LIBPLACEBO=${BUILD_LIBPLACEBO:-1}  # GPU HDR tone mapping (requires Vulkan SDK)
 BUILD_LIBX265=${BUILD_LIBX265:-1}        # H.265/HEVC encoder (apt: 3.5, latest: 4.1)
 BUILD_LIBAOM=${BUILD_LIBAOM:-1}          # AV1 reference codec (apt: 3.8, latest: 3.13)
@@ -149,12 +169,11 @@ BUILD_LIBX264=${BUILD_LIBX264:-1}        # H.264 encoder (apt: 8-bit only, src: 
 # FFmpeg version: "snapshot" for latest git, or specific version like "7.1"
 FFMPEG_VERSION=${FFMPEG_VERSION:-snapshot}
 
-# NVIDIA CUDA setup
+# NVIDIA CUDA setup (only used if ENABLE_NVIDIA_CUDA=1)
 # CUDA_VERSION options:
 #   "auto"    - (default) use installed CUDA if available, else install latest
 #   "12-9"    - explicit version (e.g., 12-9, 12-6, 13-0)
 CUDA_VERSION=${CUDA_VERSION:-auto}
-# NVIDIA CUDA flags
 # NVCC_GENCODE options:
 #   "native"  - (default) compile for build machine's GPU via nvidia-smi
 #   "minimum" - lowest arch for CUDA version (sm_52 for <13, sm_75 for 13+)
@@ -184,6 +203,7 @@ APT_PACKAGES=(
     ninja-build
     pkg-config
     texinfo
+    unzip
     wget
     yasm
     libass-dev
@@ -237,7 +257,7 @@ sudo apt-get update && sudo apt-get install -y "${APT_PACKAGES[@]}"
 CUDA_FLAGS=()
 NVCC_ARCH=""
 
-if [ "$BUILD_NVIDIA" = "1" ]; then
+if [ "$ENABLE_NVIDIA_CUDA" = "1" ]; then
     # Check if CUDA is already installed
     if [ "$CUDA_VERSION" = "auto" ]; then
         if command -v nvcc &> /dev/null; then
@@ -329,7 +349,7 @@ extern __DEVICE_FUNCTIONS_DECL__ __device_builtin__ float                  rsqrt
         fi
     fi
 
-    CUDA_FLAGS=(--enable-cuda-nvcc --enable-nvenc --enable-cuvid)
+    CUDA_FLAGS=(--enable-cuda-nvcc --enable-nvenc --enable-cuvid --enable-nvdec)
 
     CUDA_MAJOR="${CUDA_VERSION%%-*}"
 
@@ -369,6 +389,19 @@ extern __DEVICE_FUNCTIONS_DECL__ __device_builtin__ float                  rsqrt
     cd nv-codec-headers &&
     make &&
     make PREFIX="$BUILD_DIR" install
+fi
+
+
+# AMD AMF setup (hardware encoding for AMD GPUs)
+# AMF is header-only at build time; runtime driver comes from host's AMD GPU driver
+AMF_FLAGS=()
+if [ "$ENABLE_AMD_AMF" = "1" ]; then
+    cd "$SRC_DIR" &&
+    ([ -d AMF/.git ] && git -C AMF pull || (rm -rf AMF && git clone --depth 1 https://github.com/GPUOpen-LibrariesAndSDKs/AMF.git)) &&
+    mkdir -p "$BUILD_DIR/include/AMF" &&
+    cp -r AMF/amf/public/include/* "$BUILD_DIR/include/AMF/"
+    AMF_FLAGS=(--enable-amf)
+    echo "AMF headers installed for AMD GPU encoding"
 fi
 
 
@@ -579,7 +612,7 @@ if [ "$BUILD_LIBPLACEBO" = "1" ]; then
         echo "Downloading Vulkan SDK $VULKAN_SDK_VERSION..."
         cd "$SRC_DIR"
         rm -f vulkansdk.tar.xz    # Clean up any partial download
-        wget -O vulkansdk.tar.xz "https://sdk.lunarg.com/sdk/download/${VULKAN_SDK_VERSION}/linux/vulkansdk-linux-x86_64-${VULKAN_SDK_VERSION}.tar.xz"
+        wget -q -O vulkansdk.tar.xz "https://sdk.lunarg.com/sdk/download/${VULKAN_SDK_VERSION}/linux/vulkansdk-linux-x86_64-${VULKAN_SDK_VERSION}.tar.xz"
         tar xf vulkansdk.tar.xz
         mv "${VULKAN_SDK_VERSION}" "vulkan-sdk-${VULKAN_SDK_VERSION}"
         rm -f vulkansdk.tar.xz
@@ -607,19 +640,89 @@ if [ "$BUILD_LIBPLACEBO" = "1" ]; then
     ninja -C build install
 fi
 
+# LibTorch (PyTorch C++ library for DNN backend)
+# Enables AI-based video filters like dnn_processing for upscaling, denoising, etc.
+# NOTE: LibTorch 2.6.0+ renamed initXPU() to init(), breaking FFmpeg compatibility.
+#       Use 2.5.0 until FFmpeg updates their code.
+LIBTORCH_FLAGS=()
+if [ "$ENABLE_TORCH" = "1" ]; then
+    LIBTORCH_VERSION=${LIBTORCH_VERSION:-2.5.0}
+    LIBTORCH_DIR="$SRC_DIR/libtorch"
+
+    # Determine LibTorch CUDA variant
+    # LIBTORCH_VARIANT: cu124 (default), auto, cpu, cu126, cu128, cu130, rocm6.4
+    # PyTorch only releases for even-numbered CUDA versions
+    if [ "$LIBTORCH_VARIANT" != "auto" ]; then
+        TORCH_VARIANT="$LIBTORCH_VARIANT"
+        echo "LibTorch: using $TORCH_VARIANT (explicit)"
+    elif [ "$ENABLE_NVIDIA_CUDA" = "1" ]; then
+        CUDA_MAJOR="${CUDA_VERSION%%-*}"
+        CUDA_MINOR="${CUDA_VERSION#*-}"
+        if [ "$CUDA_MAJOR" -ge 13 ]; then
+            TORCH_VARIANT="cu130"
+        else
+            # Round down to nearest even, clamp to [6, 8]
+            EVEN_MINOR=$(( (CUDA_MINOR / 2) * 2 ))
+            [ "$EVEN_MINOR" -gt 8 ] && EVEN_MINOR=8
+            [ "$EVEN_MINOR" -lt 6 ] && EVEN_MINOR=6
+            TORCH_VARIANT="cu12${EVEN_MINOR}"
+        fi
+        echo "LibTorch: using $TORCH_VARIANT (from CUDA $CUDA_VERSION)"
+    else
+        TORCH_VARIANT="cpu"
+        echo "LibTorch: using CPU-only variant"
+    fi
+
+    # Download LibTorch if not present or wrong variant
+    LIBTORCH_MARKER="$LIBTORCH_DIR/.variant-${TORCH_VARIANT}"
+    if [ ! -f "$LIBTORCH_MARKER" ]; then
+        echo "Downloading LibTorch $LIBTORCH_VERSION ($TORCH_VARIANT)..."
+        cd "$SRC_DIR"
+        rm -rf libtorch libtorch.zip
+
+        # Download from pytorch.org (CXX11 ABI version required for modern compilers)
+        # Format: https://download.pytorch.org/libtorch/{variant}/libtorch-cxx11-abi-shared-with-deps-{version}%2B{variant}.zip
+        LIBTORCH_URL="https://download.pytorch.org/libtorch/${TORCH_VARIANT}/libtorch-cxx11-abi-shared-with-deps-${LIBTORCH_VERSION}%2B${TORCH_VARIANT}.zip"
+        wget -q -O libtorch.zip "$LIBTORCH_URL"
+        unzip -q libtorch.zip
+        rm -f libtorch.zip
+        touch "$LIBTORCH_MARKER"
+    fi
+
+    export LIBTORCH_PATH="$LIBTORCH_DIR"
+    LIBTORCH_FLAGS=(--enable-libtorch)
+    echo "Using LibTorch: $LIBTORCH_PATH"
+
+    # Create pkg-config file for libtorch (FFmpeg configure uses pkg-config for detection)
+    mkdir -p "$BUILD_DIR/lib/pkgconfig"
+    cat > "$BUILD_DIR/lib/pkgconfig/libtorch.pc" << PCEOF
+prefix=$LIBTORCH_DIR
+exec_prefix=\${prefix}
+libdir=\${exec_prefix}/lib
+includedir=\${prefix}/include
+
+Name: libtorch
+Description: PyTorch C++ library
+Version: $LIBTORCH_VERSION
+Libs: -L\${libdir} -ltorch -lc10 -ltorch_cpu
+Cflags: -I\${includedir} -I\${includedir}/torch/csrc/api/include -std=c++17
+PCEOF
+    echo "Created libtorch.pc for pkg-config detection"
+fi
+
 # ffmpeg
 FFMPEG_DIR="ffmpeg-${FFMPEG_VERSION}"
 cd "$SRC_DIR"
 if [ ! -d "$FFMPEG_DIR" ]; then
     if [ "$FFMPEG_VERSION" = "snapshot" ]; then
         rm -f ffmpeg-snapshot.tar.bz2    # Clean up any partial download
-        wget -O ffmpeg-snapshot.tar.bz2 https://ffmpeg.org/releases/ffmpeg-snapshot.tar.bz2
+        wget -q -O ffmpeg-snapshot.tar.bz2 https://ffmpeg.org/releases/ffmpeg-snapshot.tar.bz2
         tar xjf ffmpeg-snapshot.tar.bz2
         mv ffmpeg "$FFMPEG_DIR"
         rm -f ffmpeg-snapshot.tar.bz2
     else
         rm -f "ffmpeg-${FFMPEG_VERSION}.tar.xz"    # Clean up any partial download
-        wget -O "ffmpeg-${FFMPEG_VERSION}.tar.xz" "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz"
+        wget -q -O "ffmpeg-${FFMPEG_VERSION}.tar.xz" "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz"
         tar xJf "ffmpeg-${FFMPEG_VERSION}.tar.xz"
         rm -f "ffmpeg-${FFMPEG_VERSION}.tar.xz"
     fi
@@ -628,9 +731,10 @@ cd "$FFMPEG_DIR" && \
 # Build configure flags
 # MARCH=native for CPU-specific optimizations (opt-in, not portable)
 EXTRA_CFLAGS="-I$BUILD_DIR/include -O3${MARCH:+ -march=$MARCH -mtune=$MARCH}"
+EXTRA_CXXFLAGS=""
 # -rpath embeds library search path in binary so it finds our built libs at runtime
 EXTRA_LDFLAGS="-L$BUILD_DIR/lib -s -Wl,-rpath,$LIB_DIR"
-if [ "$BUILD_NVIDIA" = "1" ]; then
+if [ "$ENABLE_NVIDIA_CUDA" = "1" ]; then
     EXTRA_CFLAGS="$EXTRA_CFLAGS -I$CUDA_PATH/include"
     EXTRA_LDFLAGS="$EXTRA_LDFLAGS -L$CUDA_PATH/lib64"
 fi
@@ -638,12 +742,17 @@ if [ "$BUILD_LIBPLACEBO" = "1" ]; then
     EXTRA_CFLAGS="$EXTRA_CFLAGS -I$VULKAN_SDK/include"
     EXTRA_LDFLAGS="$EXTRA_LDFLAGS -L$VULKAN_SDK/lib"
 fi
-
+if [ "$ENABLE_TORCH" = "1" ]; then
+    # LibTorch needs C++ flags (FFmpeg uses require_cxx for libtorch detection)
+    EXTRA_CXXFLAGS="-I$LIBTORCH_PATH/include -I$LIBTORCH_PATH/include/torch/csrc/api/include"
+    EXTRA_LDFLAGS="$EXTRA_LDFLAGS -L$LIBTORCH_PATH/lib -Wl,-rpath,$LIBTORCH_PATH/lib"
+fi
 CONFIGURE_CMD=(
     ./configure
     --prefix="$BUILD_DIR"
     --pkg-config-flags="--static"
     --extra-cflags="$EXTRA_CFLAGS"
+    --extra-cxxflags="$EXTRA_CXXFLAGS"
     --extra-ldflags="$EXTRA_LDFLAGS"
     --extra-libs="-lpthread -lm"
     --ld="g++"
@@ -677,11 +786,12 @@ CONFIGURE_CMD=(
     --enable-libvidstab
     --enable-libvpl
     --enable-libzimg
-    --enable-nvdec
     --enable-opencl
     --enable-vaapi
     --enable-nonfree
     "${CUDA_FLAGS[@]}"
+    "${AMF_FLAGS[@]}"
+    "${LIBTORCH_FLAGS[@]}"
 )
 
 if [ "$BUILD_LIBPLACEBO" = "1" ]; then
@@ -694,7 +804,7 @@ fi
 
 # Build PATH: include CUDA bin if NVIDIA enabled
 BUILD_PATH="$BIN_DIR:$PATH"
-[ "$BUILD_NVIDIA" = "1" ] && BUILD_PATH="$CUDA_PATH/bin:$BUILD_PATH"
+[ "$ENABLE_NVIDIA_CUDA" = "1" ] && BUILD_PATH="$CUDA_PATH/bin:$BUILD_PATH"
 
 PATH="$BUILD_PATH" PKG_CONFIG_PATH="$BUILD_DIR/lib/pkgconfig:$PKG_CONFIG_PATH" "${CONFIGURE_CMD[@]}" && \
 PATH="$BUILD_PATH" make -j $NPROC && \

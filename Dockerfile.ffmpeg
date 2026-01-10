@@ -1,4 +1,4 @@
-# FFmpeg Docker image with hardware acceleration (NVENC, VAAPI, QSV)
+# FFmpeg Docker image with hardware acceleration (NVENC, VAAPI, QSV, AMF)
 #
 # Uses install-ffmpeg.sh as single source of truth for build configuration.
 #
@@ -21,7 +21,13 @@
 FROM ubuntu:24.04 AS builder
 
 # Build configuration - these are passed to install-ffmpeg.sh via environment
-ARG BUILD_NVIDIA=1
+# Hardware acceleration
+ARG ENABLE_NVIDIA_CUDA=1
+ARG ENABLE_AMD_AMF=1
+ARG ENABLE_TORCH=0
+ARG LIBTORCH_VERSION=2.5.0
+ARG LIBTORCH_VARIANT=cu124
+# Library builds
 ARG BUILD_LIBPLACEBO=1
 ARG BUILD_LIBX265=1
 ARG BUILD_LIBAOM=1
@@ -44,7 +50,11 @@ ENV BUILD_DIR=/opt/ffmpeg_build
 ENV BIN_DIR=/opt/bin
 ENV LIB_DIR=/opt/lib
 # Pass build args to script via env
-ENV BUILD_NVIDIA=${BUILD_NVIDIA}
+ENV ENABLE_NVIDIA_CUDA=${ENABLE_NVIDIA_CUDA}
+ENV ENABLE_AMD_AMF=${ENABLE_AMD_AMF}
+ENV ENABLE_TORCH=${ENABLE_TORCH}
+ENV LIBTORCH_VERSION=${LIBTORCH_VERSION}
+ENV LIBTORCH_VARIANT=${LIBTORCH_VARIANT}
 ENV BUILD_LIBPLACEBO=${BUILD_LIBPLACEBO}
 ENV BUILD_LIBX265=${BUILD_LIBX265}
 ENV BUILD_LIBAOM=${BUILD_LIBAOM}
@@ -74,7 +84,9 @@ FROM ubuntu:24.04
 
 ARG BUILD_DATE
 ARG FFMPEG_VERSION=snapshot
-ARG BUILD_NVIDIA=1
+ARG ENABLE_NVIDIA_CUDA=1
+ARG ENABLE_AMD_AMF=1
+ARG ENABLE_TORCH=0
 ARG BUILD_LIBPLACEBO=1
 ARG BUILD_LIBX265=1
 ARG BUILD_LIBAOM=1
@@ -89,7 +101,7 @@ ARG BUILD_LIBX264=1
 
 LABEL org.opencontainers.image.created="${BUILD_DATE}"
 LABEL org.opencontainers.image.title="netv-ffmpeg"
-LABEL org.opencontainers.image.description="FFmpeg with NVENC, VAAPI, QSV hardware acceleration"
+LABEL org.opencontainers.image.description="FFmpeg with NVENC, VAAPI, QSV, AMF hardware acceleration"
 LABEL org.opencontainers.image.version="${FFMPEG_VERSION}"
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -194,11 +206,23 @@ RUN --mount=type=bind,from=builder,source=/opt/ffmpeg_build/share,target=/tmp/ff
         cp -a /tmp/ffmpeg_share/libvmaf /usr/local/share/; \
     fi
 
+# Copy LibTorch shared libraries if torch enabled (needed for DNN filters)
+RUN --mount=type=bind,from=builder,source=/src,target=/tmp/src \
+    if [ "$ENABLE_TORCH" = "1" ] && [ -d /tmp/src/libtorch/lib ]; then \
+        mkdir -p /opt/lib && \
+        cp -a /tmp/src/libtorch/lib/*.so* /opt/lib/ && \
+        echo "/opt/lib" > /etc/ld.so.conf.d/libtorch.conf && \
+        ldconfig; \
+    fi
+
 # Verify all dependencies are satisfied
 RUN ldd /usr/local/bin/ffmpeg | grep -q "not found" && \
     { echo "Missing libraries:"; ldd /usr/local/bin/ffmpeg | grep "not found"; exit 1; } || \
     echo "All FFmpeg dependencies satisfied"
 
-RUN ffmpeg -version > /ffmpeg-version.txt
+RUN ffmpeg -version > /ffmpeg-version.txt && \
+    ffmpeg -hide_banner -encoders > /ffmpeg-encoders.txt && \
+    ffmpeg -hide_banner -decoders > /ffmpeg-decoders.txt && \
+    ffmpeg -hide_banner -filters > /ffmpeg-filters.txt
 
 CMD ["ffmpeg", "-version"]
