@@ -253,6 +253,11 @@ class VirtualGuide {
   }
 
   async fetchMissingRanges(ranges) {
+    // Early return if no ranges to fetch
+    if (!ranges || ranges.length === 0) {
+      return;
+    }
+
     // Merge into a single request for simplicity
     const overallStart = Math.min(...ranges.map(r => r.start));
     const overallEnd = Math.max(...ranges.map(r => r.end));
@@ -370,7 +375,8 @@ class VirtualGuide {
       return str.replace(/&/g, '&amp;')
                 .replace(/</g, '&lt;')
                 .replace(/>/g, '&gt;')
-                .replace(/"/g, '&quot;');
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
     };
 
     // Desktop programs

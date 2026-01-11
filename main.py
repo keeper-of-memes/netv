@@ -44,7 +44,7 @@ import time
 import urllib.error
 import urllib.parse
 
-from fastapi import Depends, FastAPI, Form, HTTPException, Request
+from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -836,9 +836,9 @@ def _build_guide_rows(
 @app.get("/api/guide/rows")
 async def guide_rows_api(
     user: Annotated[dict, Depends(require_auth)],
-    start: int = 0,
-    count: int = 130,
-    offset: int = 0,
+    start: int = Query(default=0, ge=0, description="Starting row index"),
+    count: int = Query(default=130, ge=1, le=500, description="Number of rows to fetch"),
+    offset: int = Query(default=0, ge=-168, le=168, description="Hours offset from now"),
     cats: str = "",
 ):
     """API endpoint for virtual scrolling - returns guide rows as JSON."""
