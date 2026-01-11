@@ -534,6 +534,9 @@ def probe_media(
             "json",
             "-show_streams",
             "-show_format",
+            # Allow HLS segments without standard extensions (some IPTV providers use token URLs)
+            "-extension_picky",
+            "0",
         ]
         user_agent = get_user_agent()
         if user_agent:
@@ -957,6 +960,8 @@ def build_hls_ffmpeg_cmd(
     )
     if user_agent:
         cmd.extend(["-user_agent", user_agent])
+    # Allow HLS segments without standard extensions (some IPTV providers use token URLs)
+    cmd.extend(["-extension_picky", "0"])
     cmd.extend(["-i", input_url])
 
     # Subtitle extraction

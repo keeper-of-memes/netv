@@ -1221,6 +1221,9 @@ def _get_live_player_info(stream_id: str) -> PlayerInfo:
     elif stream.get("source_type") == "xtream":
         base, user, pwd = stream["source_url"], stream["source_username"], stream["source_password"]
         orig_id = stream_id.split("_")[-1] if "_" in stream_id else stream_id
+        # URL-encode username/password to handle special chars like # in passwords
+        user = urllib.parse.quote(user, safe='')
+        pwd = urllib.parse.quote(pwd, safe='')
         info.url = f"{base}/live/{user}/{pwd}/{orig_id}.m3u8"
 
     # Look up source settings

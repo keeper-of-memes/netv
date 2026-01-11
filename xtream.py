@@ -86,7 +86,10 @@ class XtreamClient:
         return self._api("get_short_epg", stream_id=stream_id, limit=limit)
 
     def build_stream_url(self, stream_type: str, stream_id: int, ext: str = "") -> str:
-        base = f"{self.base_url}/{stream_type}/{self.username}/{self.password}/{stream_id}"
+        # URL-encode username/password to handle special chars like # in passwords
+        user = urllib.parse.quote(self.username, safe='')
+        pwd = urllib.parse.quote(self.password, safe='')
+        base = f"{self.base_url}/{stream_type}/{user}/{pwd}/{stream_id}"
         return f"{base}.{ext}" if ext else base
 
     def build_timeshift_url(
@@ -97,8 +100,11 @@ class XtreamClient:
         ext: str = "ts",
     ) -> str:
         """For streams with tv_archive=1. start format: YYYY-MM-DD:HH-MM."""
+        # URL-encode username/password to handle special chars like # in passwords
+        user = urllib.parse.quote(self.username, safe='')
+        pwd = urllib.parse.quote(self.password, safe='')
         return (
-            f"{self.base_url}/timeshift/{self.username}/{self.password}/"
+            f"{self.base_url}/timeshift/{user}/{pwd}/"
             f"{duration}/{start}/{stream_id}.{ext}"
         )
 
