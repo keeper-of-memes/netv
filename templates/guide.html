@@ -50,8 +50,20 @@
   <div class="desktop-only flex-wrap items-center justify-between gap-2 mb-4">
     <div class="min-w-0 flex items-center gap-2">
       <h2 class="text-xl sm:text-3xl font-bold">Live TV</h2>
-      {% if selected_cats %}
-      <a href="/settings#filters" class="text-sm text-gray-400 hover:text-blue-400">{{ selected_cats|length }} categories &mdash; {{ channel_count }} channels</a>
+      {% if saved_filter or selected_cats %}
+      <!-- Category filter dropdown -->
+      <select id="category-filter" class="bg-gray-700 text-sm rounded px-2 py-1 border border-gray-600 focus:border-blue-500 focus:outline-none">
+        <option value="">All categories</option>
+        {% for cat in categories %}
+        {% if cat.category_id|string in (saved_filter or selected_cats) %}
+        <option value="{{ cat.category_id }}" {% if cats_param == cat.category_id|string %}selected{% endif %}>
+          {{ cat.category_name }}
+        </option>
+        {% endif %}
+        {% endfor %}
+      </select>
+      <span class="text-xs text-gray-500">({{ total_count | default(channel_count) }} ch)</span>
+      <a href="/settings#filters" class="text-xs text-gray-500 hover:text-blue-400">[edit]</a>
       {% endif %}
     </div>
     <div class="flex gap-1">
@@ -85,6 +97,18 @@
   <div class="compact-only mobile-header items-center justify-between gap-1 p-2 bg-gray-900 border-b border-gray-700 rounded-t-lg">
     <div class="flex items-center gap-1">
       <span class="text-sm font-bold">Live TV</span>
+      {% if saved_filter or selected_cats %}
+      <select id="category-filter-mobile" class="bg-gray-700 text-[10px] rounded px-1 py-0.5 border border-gray-600 max-w-[120px]">
+        <option value="">All</option>
+        {% for cat in categories %}
+        {% if cat.category_id|string in (saved_filter or selected_cats) %}
+        <option value="{{ cat.category_id }}" {% if cats_param == cat.category_id|string %}selected{% endif %}>
+          {{ cat.category_name }}
+        </option>
+        {% endif %}
+        {% endfor %}
+      </select>
+      {% endif %}
     </div>
     <div class="flex gap-1">
       <a href="/guide?offset={{ offset - 2 }}{% if cats_param %}&cats={{ cats_param }}{% endif %}"
@@ -208,18 +232,64 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="/static/js/virtual-guide.js"></script>
 <script>
-// Handle category filter: sync to server when URL has cats
+// Virtual scroll configuration
+const GUIDE_CONFIG = {
+  totalRows: {{ total_count | default(0) }},
+  offset: {{ offset }},
+  cats: '{{ cats_param }}',
+  initialRows: {{ grid_data | tojson | safe }},
+  // Logo URL proxy (matches _logo_url_filter in Python)
+  logoUrlFilter: function(url) {
+    if (!url || url.startsWith('/') || url.startsWith('data:')) {
+      return url;
+    }
+    try {
+      const parsed = new URL(url);
+      const source = parsed.hostname.split(':')[0] || 'external';
+      return '/api/logo?source=' + encodeURIComponent(source) + '&url=' + encodeURIComponent(url);
+    } catch (e) {
+      return url;
+    }
+  }
+};
+
+// Handle category filter: sync to server when URL has cats (but not temp filters)
 (function() {
   const urlCats = '{{ cats_param }}';
-  if (urlCats) {
-    // Have cats in URL - sync to server
+  const urlParams = new URLSearchParams(window.location.search);
+  const isTempFilter = urlParams.get('filter') === '1';
+
+  // Only sync to saved filter if it's not a temporary dropdown filter
+  if (urlCats && !isTempFilter) {
     fetch('/settings/guide-filter', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({cats: urlCats.split(',')})
     });
   }
+})();
+
+// Category dropdown filter
+(function() {
+  function handleCategoryChange(e) {
+    const catId = e.target.value;
+    const offset = {{ offset }};
+    if (catId) {
+      // Filter to single category - add filter=1 to indicate temp filter
+      window.location.href = `/guide?offset=${offset}&cats=${catId}&filter=1`;
+    } else {
+      // "All" selected - use saved filter (no cats param)
+      window.location.href = `/guide?offset=${offset}`;
+    }
+  }
+
+  const dropdown = document.getElementById('category-filter');
+  const dropdownMobile = document.getElementById('category-filter-mobile');
+
+  if (dropdown) dropdown.addEventListener('change', handleCategoryChange);
+  if (dropdownMobile) dropdownMobile.addEventListener('change', handleCategoryChange);
 })();
 
 // Auto-refresh when EPG finishes loading
@@ -247,16 +317,35 @@
 })();
 {% endif %}
 
+// Initialize virtual scrolling if we have more than initial batch
+(function() {
+  if (GUIDE_CONFIG.totalRows > GUIDE_CONFIG.initialRows.length && GUIDE_CONFIG.totalRows > 0) {
+    const container = document.querySelector('.guide-container');
+    if (container) {
+      window.virtualGuide = new VirtualGuide({
+        container: container,
+        totalRows: GUIDE_CONFIG.totalRows,
+        initialRows: GUIDE_CONFIG.initialRows,
+        offset: GUIDE_CONFIG.offset,
+        cats: GUIDE_CONFIG.cats,
+        rowHeight: 64,  // 4rem desktop
+        rowHeightMobile: 40,  // 2.5rem mobile
+        bufferSize: 50,
+        logoUrlFilter: GUIDE_CONFIG.logoUrlFilter
+      });
+    }
+  }
+})();
+
 // EPG-specific keyboard navigation
 (function() {
   function isVisible(el) {
     return el.offsetParent !== null;
   }
 
+  // Use total count for keyboard navigation range
   const maxRow = () => {
-    const cells = Array.from(document.querySelectorAll('[data-nav="epg"]')).filter(isVisible);
-    const rows = cells.map(el => parseInt(el.dataset.row) || 0);
-    return Math.max(...rows, 0);
+    return Math.max(0, GUIDE_CONFIG.totalRows - 1);
   };
 
   function getVisiblePrograms(row) {
@@ -297,6 +386,28 @@
   }
 
   function focusCell(row, col) {
+    // If virtual scrolling is active, ensure row is in view first
+    if (window.virtualGuide) {
+      const vg = window.virtualGuide;
+      const rowHeight = vg.currentRowHeight;
+      const viewport = vg.viewport;
+
+      // Check if row is outside rendered range
+      if (row < vg.renderedRange.start || row >= vg.renderedRange.end) {
+        // Scroll to bring row into view, then focus after render
+        const targetScroll = row * rowHeight - (viewport.clientHeight / 2) + (rowHeight / 2);
+        viewport.scrollTop = Math.max(0, targetScroll);
+
+        // Wait for render and then focus
+        setTimeout(() => doFocus(row, col), 100);
+        return;
+      }
+    }
+
+    doFocus(row, col);
+  }
+
+  function doFocus(row, col) {
     let cell;
     if (col === -1) {
       const candidates = document.querySelectorAll(`[data-nav="epg"][data-row="${row}"][data-col="-1"]`);
@@ -382,11 +493,15 @@
   });
 
   // Save/restore scroll position (persists across reloads and navigation)
+  // Note: VirtualGuide handles scroll restore for virtual scrolling mode
   const scrollKey = 'guide_scroll';
   const gridContainer = document.querySelector('.overflow-y-auto');
   if (gridContainer) {
-    const saved = sessionStorage.getItem(scrollKey);
-    if (saved) gridContainer.scrollTop = parseInt(saved);
+    // Only restore if not using virtual scrolling (VirtualGuide handles it)
+    if (!window.virtualGuide) {
+      const saved = sessionStorage.getItem(scrollKey);
+      if (saved) gridContainer.scrollTop = parseInt(saved);
+    }
     // Save on scroll (debounced)
     let scrollTimer;
     gridContainer.addEventListener('scroll', () => {

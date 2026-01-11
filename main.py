@@ -625,9 +625,85 @@ async def guide_page(
             )
 
     categories = get_cache()["live_categories"]
-    all_streams = get_cache()["live_streams"]
     # EPG is optional - check sqlite db for data
     epg_loading = not epg.has_programs()
+
+    # Get the full saved filter for dropdown (not just current URL filter)
+    user_settings = load_user_settings(username)
+    saved_filter = set(user_settings.get("guide_filter", []))
+
+    # Use helper to get filtered/sorted streams
+    streams, ordered_cats, selected_cats = _get_guide_streams(cats, username)
+    total_count = len(streams)
+
+    # Time window: 3 hours starting from offset
+    now = datetime.now(UTC)
+    window_start = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=offset)
+    window_end = window_start + timedelta(hours=3)
+
+    # Virtual scrolling: only render first batch (130 rows)
+    # JS will handle fetching more as user scrolls
+    initial_batch_size = 130
+    grid_data = _build_guide_rows(
+        streams, 0, initial_batch_size, window_start, window_end
+    )
+
+    # Time markers (every 30 min) - convert to local time for display
+    time_markers = []
+    for i in range(7):  # 0, 30, 60, 90, 120, 150, 180 minutes
+        t = window_start + timedelta(minutes=i * 30)
+        t_local = t.astimezone()  # Convert to local timezone
+        time_markers.append(
+            {
+                "label": t_local.strftime("%H:%M"),
+                "left_pct": (i * 30 / 180) * 100,
+            }
+        )
+
+    # Mobile time markers (2 hour window instead of 3)
+    time_markers_mobile = []
+    for i in range(5):  # 0, 30, 60, 90, 120 minutes
+        t = window_start + timedelta(minutes=i * 30)
+        t_local = t.astimezone()
+        time_markers_mobile.append(
+            {
+                "label": t_local.strftime("%H:%M"),
+                "left_pct": (i * 30 / 120) * 100,
+            }
+        )
+
+    return TEMPLATES.TemplateResponse(
+        request,
+        "guide.html",
+        {
+            "categories": categories,
+            "selected_cats": selected_cats,
+            "saved_filter": saved_filter,  # Full saved filter for dropdown
+            "cats_param": cats,
+            "grid_data": grid_data,
+            "time_markers": time_markers,
+            "time_markers_mobile": time_markers_mobile,
+            "offset": offset,
+            "window_start": window_start.strftime("%Y-%m-%d %H:%M"),
+            "epg_error": get_cache().get("epg_error"),
+            "epg_loading": epg_loading,
+            "channel_count": len(grid_data),
+            "total_count": total_count,  # For virtual scrolling
+            "loading": False,
+            "content_access": _get_content_access(username),
+        },
+    )
+
+
+def _get_guide_streams(
+    cats: str, username: str
+) -> tuple[list[dict], list[str], set[str]]:
+    """Get filtered and sorted streams for guide.
+
+    Returns:
+        Tuple of (filtered_streams, ordered_cat_ids, selected_cat_set)
+    """
+    all_streams = get_cache().get("live_streams", [])
 
     # Parse selected category IDs (ordered list)
     ordered_cats: list[str] = []
@@ -635,54 +711,65 @@ async def guide_page(
         ordered_cats = [c.strip() for c in cats.split(",") if c.strip()]
     selected_cats = set(ordered_cats)
 
+    if not selected_cats:
+        return [], ordered_cats, selected_cats
+
     # Get user's unavailable groups for filtering
     user_limits = auth.get_user_limits(username)
     unavailable_groups = set(user_limits.get("unavailable_groups", []))
 
-    # Filter and sort streams by category order
-    if selected_cats:
-        cat_order = {c: i for i, c in enumerate(ordered_cats)}
+    cat_order = {c: i for i, c in enumerate(ordered_cats)}
 
-        def stream_sort_key(s: dict) -> int:
-            for c in s.get("category_ids") or []:
-                if str(c) in cat_order:
-                    return cat_order[str(c)]
-            return len(ordered_cats)
+    def stream_sort_key(s: dict) -> int:
+        for c in s.get("category_ids") or []:
+            if str(c) in cat_order:
+                return cat_order[str(c)]
+        return len(ordered_cats)
 
-        def stream_allowed(s: dict) -> bool:
-            """Check if stream is allowed (not in any unavailable group)."""
-            cat_ids = s.get("category_ids") or []
-            # Stream is blocked if ANY of its categories are unavailable
-            return not any(f"cat:{c}" in unavailable_groups for c in cat_ids)
+    def stream_allowed(s: dict) -> bool:
+        cat_ids = s.get("category_ids") or []
+        return not any(f"cat:{c}" in unavailable_groups for c in cat_ids)
 
-        streams = [
-            s
-            for s in all_streams
-            if any(str(c) in selected_cats for c in (s.get("category_ids") or []))
-            and stream_allowed(s)
-        ]
-        streams.sort(key=stream_sort_key)
-    else:
-        streams = []
+    streams = [
+        s
+        for s in all_streams
+        if any(str(c) in selected_cats for c in (s.get("category_ids") or []))
+        and stream_allowed(s)
+    ]
+    streams.sort(key=stream_sort_key)
 
-    # Build channel list with EPG IDs
+    return streams, ordered_cats, selected_cats
+
+
+def _build_guide_rows(
+    streams: list[dict],
+    start_idx: int,
+    count: int,
+    window_start: datetime,
+    window_end: datetime,
+) -> list[dict]:
+    """Build guide grid rows for a range of streams.
+
+    Returns:
+        List of row dicts with channel info and programs.
+    """
+    end_idx = min(start_idx + count, len(streams))
+    slice_streams = streams[start_idx:end_idx]
+
+    if not slice_streams:
+        return []
+
     # Collect EPG IDs for batch query
-    epg_ids = [s.get("epg_channel_id") or "" for s in streams]
+    epg_ids = [s.get("epg_channel_id") or "" for s in slice_streams]
     epg_ids_set = [e for e in epg_ids if e]
 
     # Batch fetch icons and programs
     icons_map = epg.get_icons_batch(epg_ids_set) if epg_ids_set else {}
 
-    # Time window: 3 hours starting from offset
-    now = datetime.now(UTC)
-    window_start = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=offset)
-    window_end = window_start + timedelta(hours=3)
-
-    # Build preferred_sources: map epg_channel_id -> stream's source_id
-    # This prefers EPG from the same source as the channel (e.g., HDHomeRun EPG for HDHomeRun channels)
+    # Build preferred_sources for EPG matching
     preferred_sources = {
         epg_id: s.get("source_id", "")
-        for s, epg_id in zip(streams, epg_ids, strict=False)
+        for s, epg_id in zip(slice_streams, epg_ids, strict=False)
         if epg_id and s.get("source_id")
     }
     programs_map = (
@@ -691,19 +778,13 @@ async def guide_page(
         else {}
     )
 
-    # Log streams with EPG IDs that returned no programs (potential misconfiguration)
-    for s, epg_id in zip(streams, epg_ids, strict=False):
-        if epg_id and not programs_map.get(epg_id):
-            log.warning(
-                "Stream '%s' has epg_channel_id='%s' but no EPG programs found",
-                s["name"],
-                epg_id,
-            )
-
-    # Build channel list and grid data
+    # Build rows
     window_end_mobile = window_start + timedelta(hours=2)
     grid_data = []
-    for s, epg_id in zip(streams, epg_ids, strict=False):
+
+    for idx, (s, epg_id) in enumerate(
+        zip(slice_streams, epg_ids, strict=False), start=start_idx
+    ):
         icon = s.get("stream_icon", "") or icons_map.get(epg_id, "")
         ch = {
             "stream_id": s["stream_id"],
@@ -711,7 +792,8 @@ async def guide_page(
             "icon": icon,
             "epg_id": epg_id,
         }
-        row = {"channel": ch, "programs": [], "programs_mobile": []}
+        row = {"channel": ch, "programs": [], "programs_mobile": [], "index": idx}
+
         for p in programs_map.get(epg_id, []):
             p_start = max(p.start, window_start)
             p_end = min(p.stop, window_end)
@@ -745,51 +827,56 @@ async def guide_page(
                         "width_pct": width_pct_m,
                     }
                 )
+
         grid_data.append(row)
 
-    # Time markers (every 30 min) - convert to local time for display
-    time_markers = []
-    for i in range(7):  # 0, 30, 60, 90, 120, 150, 180 minutes
-        t = window_start + timedelta(minutes=i * 30)
-        t_local = t.astimezone()  # Convert to local timezone
-        time_markers.append(
-            {
-                "label": t_local.strftime("%H:%M"),
-                "left_pct": (i * 30 / 180) * 100,
-            }
-        )
+    return grid_data
 
-    # Mobile time markers (2 hour window instead of 3)
-    time_markers_mobile = []
-    for i in range(5):  # 0, 30, 60, 90, 120 minutes
-        t = window_start + timedelta(minutes=i * 30)
-        t_local = t.astimezone()
-        time_markers_mobile.append(
-            {
-                "label": t_local.strftime("%H:%M"),
-                "left_pct": (i * 30 / 120) * 100,
-            }
-        )
 
-    return TEMPLATES.TemplateResponse(
-        request,
-        "guide.html",
-        {
-            "categories": categories,
-            "selected_cats": selected_cats,
-            "cats_param": cats,
-            "grid_data": grid_data,
-            "time_markers": time_markers,
-            "time_markers_mobile": time_markers_mobile,
-            "offset": offset,
-            "window_start": window_start.strftime("%Y-%m-%d %H:%M"),
-            "epg_error": get_cache().get("epg_error"),
-            "epg_loading": epg_loading,
-            "channel_count": len(grid_data),
-            "loading": False,
-            "content_access": _get_content_access(username),
-        },
+@app.get("/api/guide/rows")
+async def guide_rows_api(
+    user: Annotated[dict, Depends(require_auth)],
+    start: int = 0,
+    count: int = 130,
+    offset: int = 0,
+    cats: str = "",
+):
+    """API endpoint for virtual scrolling - returns guide rows as JSON."""
+    username = user.get("sub", "")
+
+    # Use saved filter if no cats provided
+    if not cats:
+        user_settings = load_user_settings(username)
+        saved = user_settings.get("guide_filter", [])
+        if saved:
+            cats = ",".join(saved)
+
+    # Ensure data is loaded
+    if "live_streams" not in get_cache():
+        cached = await asyncio.to_thread(load_file_cache, "live_data")
+        if cached:
+            data, _ = cached
+            with get_cache_lock():
+                get_cache()["live_categories"] = data["cats"]
+                get_cache()["live_streams"] = data["streams"]
+                get_cache()["epg_urls"] = parse_epg_urls(data.get("epg_urls", []))
+
+    streams, _, _ = _get_guide_streams(cats, username)
+    total_count = len(streams)
+
+    if total_count == 0:
+        return JSONResponse({"rows": [], "total": 0, "start": start})
+
+    # Time window
+    now = datetime.now(UTC)
+    window_start = now.replace(minute=0, second=0, microsecond=0) + timedelta(
+        hours=offset
     )
+    window_end = window_start + timedelta(hours=3)
+
+    rows = _build_guide_rows(streams, start, count, window_start, window_end)
+
+    return JSONResponse({"rows": rows, "total": total_count, "start": start})
 
 
 def _start_vod_background_load() -> None:
