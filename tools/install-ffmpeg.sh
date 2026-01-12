@@ -642,8 +642,8 @@ fi
 
 # LibTorch (PyTorch C++ library for DNN backend)
 # Enables AI-based video filters like dnn_processing for upscaling, denoising, etc.
-# NOTE: LibTorch 2.6.0+ renamed initXPU() to init(), breaking FFmpeg compatibility.
-#       Use 2.5.0 until FFmpeg updates their code.
+# NOTE: LibTorch 2.6.0+ renamed initXPU() to init(). We patch ffmpeg to handle both.
+#       Use 2.7.0+ for RTX 50-series (Blackwell/SM 12.0) support.
 LIBTORCH_FLAGS=()
 if [ "$ENABLE_TORCH" = "1" ]; then
     LIBTORCH_VERSION=${LIBTORCH_VERSION:-2.5.0}
@@ -741,13 +741,25 @@ if [ ! -d "$FFMPEG_DIR" ]; then
     fi
 fi
 
-# Patch ffmpeg's torch backend to support CUDA (upstream only supports CPU/XPU)
+# Patch ffmpeg's torch backend
 if [ "$ENABLE_TORCH" = "1" ]; then
     TORCH_BACKEND="$FFMPEG_DIR/libavfilter/dnn/dnn_backend_torch.cpp"
+
+    # Patch 1: Fix initXPU() -> init() for libtorch 2.6+ compatibility
+    if [ -f "$TORCH_BACKEND" ] && grep -q "initXPU()" "$TORCH_BACKEND"; then
+        TORCH_MAJOR=$(echo "$LIBTORCH_VERSION" | cut -d. -f1)
+        TORCH_MINOR=$(echo "$LIBTORCH_VERSION" | cut -d. -f2)
+        if [ "$TORCH_MAJOR" -gt 2 ] || { [ "$TORCH_MAJOR" -eq 2 ] && [ "$TORCH_MINOR" -ge 6 ]; }; then
+            echo "Patching ffmpeg for libtorch 2.6+ (initXPU -> init)..."
+            sed -i 's/initXPU()/init()/g' "$TORCH_BACKEND"
+        fi
+    fi
+
+    # Patch 2: Add CUDA device support (upstream only supports CPU/XPU)
     if [ -f "$TORCH_BACKEND" ] && ! grep -q "device.is_cuda()" "$TORCH_BACKEND"; then
         echo "Patching ffmpeg torch backend for CUDA support..."
         # Add CUDA device support between XPU and the catch-all error
-        sed -i '/at::detail::getXPUHooks().initXPU();/a\
+        sed -i '/at::detail::getXPUHooks().init/a\
     } else if (device.is_cuda()) {\
         if (!at::cuda::is_available()) {\
             av_log(ctx, AV_LOG_ERROR, "No CUDA device found\\n");\

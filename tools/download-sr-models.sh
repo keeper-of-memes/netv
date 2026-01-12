@@ -110,25 +110,31 @@ class RRDBNet(torch.nn.Module):
     def __init__(self, num_in_ch=3, num_out_ch=3, scale=4, num_feat=64, num_block=23, num_grow_ch=32):
         super().__init__()
         self.scale = scale
-        self.conv_first = torch.nn.Conv2d(num_in_ch, num_feat, 3, 1, 1)
+        # x2plus uses pixel unshuffle: 3 channels * 2*2 = 12 input channels
+        if scale == 2:
+            self.pixel_unshuffle = torch.nn.PixelUnshuffle(2)
+            self.conv_first = torch.nn.Conv2d(num_in_ch * 4, num_feat, 3, 1, 1)
+        else:
+            self.pixel_unshuffle = None
+            self.conv_first = torch.nn.Conv2d(num_in_ch, num_feat, 3, 1, 1)
         self.body = torch.nn.Sequential(*[RRDB(num_feat, num_grow_ch) for _ in range(num_block)])
         self.conv_body = torch.nn.Conv2d(num_feat, num_feat, 3, 1, 1)
 
-        # Upsampling
+        # Upsampling (x2plus uses unshuffle so needs 2 upsamples for 2x, x4 needs 2 for 4x)
         self.conv_up1 = torch.nn.Conv2d(num_feat, num_feat, 3, 1, 1)
         self.conv_up2 = torch.nn.Conv2d(num_feat, num_feat, 3, 1, 1)
-        if scale == 4:
-            self.conv_up3 = None
         self.conv_hr = torch.nn.Conv2d(num_feat, num_feat, 3, 1, 1)
         self.conv_last = torch.nn.Conv2d(num_feat, num_out_ch, 3, 1, 1)
         self.lrelu = torch.nn.LeakyReLU(negative_slope=0.2, inplace=True)
 
     def forward(self, x):
+        if self.pixel_unshuffle is not None:
+            x = self.pixel_unshuffle(x)
         feat = self.conv_first(x)
         body_feat = self.conv_body(self.body(feat))
         feat = feat + body_feat
 
-        # Upsample
+        # Upsample (always 2 steps: x2plus uses unshuffle so 2+2=2x net, x4 is just 2+2=4x)
         feat = self.lrelu(self.conv_up1(torch.nn.functional.interpolate(feat, scale_factor=2, mode='nearest')))
         feat = self.lrelu(self.conv_up2(torch.nn.functional.interpolate(feat, scale_factor=2, mode='nearest')))
         out = self.conv_last(self.lrelu(self.conv_hr(feat)))
@@ -228,6 +234,7 @@ def convert_compact_model(pth_path, upscale=4, num_conv=16, num_feat=64):
 
 # Convert RRDBNet models (high quality, slow)
 rrdb_models = [
+    ('RealESRGAN_x2plus.pth', 2, 23),
     ('RealESRGAN_x4plus.pth', 4, 23),
 ]
 
