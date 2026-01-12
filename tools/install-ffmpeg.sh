@@ -772,11 +772,23 @@ if [ "$ENABLE_LIBTORCH" = "1" ]; then
     if [ -f "$TORCH_BACKEND" ] && ! grep -q "device.is_cuda()" "$TORCH_BACKEND"; then
         echo "Patching ffmpeg torch backend for CUDA support..."
         # Add CUDA device support between XPU and the catch-all error
+        # Also adds dlopen for libtorch_cuda.so to load CUDA kernels at runtime
         sed -i '/at::detail::getXPUHooks().init/a\
     } else if (device.is_cuda()) {\
         if (!at::cuda::is_available()) {\
             av_log(ctx, AV_LOG_ERROR, "No CUDA device found\\n");\
             goto fail;\
+        }\
+        // Load CUDA kernels - required for libtorch CUDA ops\
+        static bool cuda_lib_loaded = false;\
+        if (!cuda_lib_loaded) {\
+            cuda_lib_loaded = true;\
+            void *cuda_handle = dlopen("libtorch_cuda.so", RTLD_NOW | RTLD_GLOBAL);\
+            if (cuda_handle) {\
+                av_log(ctx, AV_LOG_DEBUG, "libtorch_cuda.so loaded\\n");\
+            } else {\
+                av_log(ctx, AV_LOG_WARNING, "Failed to load libtorch_cuda.so: %s\\n", dlerror());\
+            }\
         }' "$TORCH_BACKEND"
         # Add required CUDA header
         if ! grep -q "#include <ATen/cuda/CUDAContext.h>" "$TORCH_BACKEND"; then
