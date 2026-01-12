@@ -695,6 +695,12 @@ if [ "$ENABLE_TORCH" = "1" ]; then
 
     # Create pkg-config file for libtorch (FFmpeg configure uses pkg-config for detection)
     mkdir -p "$BUILD_DIR/lib/pkgconfig"
+    # Include CUDA libs if using CUDA variant
+    if [[ "$TORCH_VARIANT" == cu* ]]; then
+        TORCH_LIBS="-ltorch -lc10 -ltorch_cpu -ltorch_cuda -lc10_cuda"
+    else
+        TORCH_LIBS="-ltorch -lc10 -ltorch_cpu"
+    fi
     cat > "$BUILD_DIR/lib/pkgconfig/libtorch.pc" << PCEOF
 prefix=$LIBTORCH_DIR
 exec_prefix=\${prefix}
@@ -704,10 +710,10 @@ includedir=\${prefix}/include
 Name: libtorch
 Description: PyTorch C++ library
 Version: $LIBTORCH_VERSION
-Libs: -L\${libdir} -ltorch -lc10 -ltorch_cpu
+Libs: -L\${libdir} $TORCH_LIBS
 Cflags: -I\${includedir} -I\${includedir}/torch/csrc/api/include -std=c++17
 PCEOF
-    echo "Created libtorch.pc for pkg-config detection"
+    echo "Created libtorch.pc for pkg-config detection (variant: $TORCH_VARIANT)"
 fi
 
 # ffmpeg
@@ -727,6 +733,27 @@ if [ ! -d "$FFMPEG_DIR" ]; then
         rm -f "ffmpeg-${FFMPEG_VERSION}.tar.xz"
     fi
 fi
+
+# Patch ffmpeg's torch backend to support CUDA (upstream only supports CPU/XPU)
+if [ "$ENABLE_LIBTORCH" = "1" ]; then
+    TORCH_BACKEND="$FFMPEG_DIR/libavfilter/dnn/dnn_backend_torch.cpp"
+    if [ -f "$TORCH_BACKEND" ] && ! grep -q "device.is_cuda()" "$TORCH_BACKEND"; then
+        echo "Patching ffmpeg torch backend for CUDA support..."
+        # Add CUDA device support between XPU and the catch-all error
+        sed -i '/at::detail::getXPUHooks().initXPU();/a\
+    } else if (device.is_cuda()) {\
+        if (!at::cuda::is_available()) {\
+            av_log(ctx, AV_LOG_ERROR, "No CUDA device found\\n");\
+            goto fail;\
+        }' "$TORCH_BACKEND"
+        # Add required CUDA header
+        if ! grep -q "#include <ATen/cuda/CUDAContext.h>" "$TORCH_BACKEND"; then
+            sed -i '/#include <torch\/torch.h>/a #include <ATen/cuda/CUDAContext.h>' "$TORCH_BACKEND"
+        fi
+        echo "Torch CUDA patch applied"
+    fi
+fi
+
 cd "$FFMPEG_DIR" && \
 # Build configure flags
 # MARCH=native for CPU-specific optimizations (opt-in, not portable)

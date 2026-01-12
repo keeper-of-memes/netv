@@ -165,16 +165,9 @@ def get_settings() -> dict[str, Any]:
 
 
 def get_ffmpeg_env() -> dict[str, str] | None:
-    """Get environment for ffmpeg subprocess, including libtorch path if needed."""
-    if not _sr_libtorch_path:
-        return None
-    import os
-
-    env = os.environ.copy()
-    ld_path = env.get("LD_LIBRARY_PATH", "")
-    if _sr_libtorch_path not in ld_path:
-        env["LD_LIBRARY_PATH"] = f"{_sr_libtorch_path}:{ld_path}" if ld_path else _sr_libtorch_path
-    return env
+    """Get environment for ffmpeg subprocess. Returns None (ffmpeg has libtorch via rpath)."""
+    # ffmpeg is built with -Wl,-rpath pointing to libtorch, so no LD_LIBRARY_PATH needed
+    return None
 
 
 def _build_sr_filter(sr_mode: str, source_height: int, target_height: int) -> str:

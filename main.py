@@ -125,16 +125,16 @@ SR_MODEL_PATH = pathlib.Path(
     )
 )
 
-# LibTorch library path for ffmpeg DNN backend
+# LibTorch library path for ffmpeg DNN backend (optional - ffmpeg has rpath baked in)
 LIBTORCH_LIB_PATH = os.environ.get(
     "LIBTORCH_LIB_PATH",
-    str(pathlib.Path.home() / "research/.venv/lib/python3.12/site-packages/torch/lib"),
+    str(pathlib.Path.home() / "ffmpeg_sources/libtorch/lib"),
 )
 
 
 def is_sr_available() -> bool:
-    """Check if super-resolution is available (model and libtorch exist)."""
-    return SR_MODEL_PATH.exists() and pathlib.Path(LIBTORCH_LIB_PATH).exists()
+    """Check if super-resolution is available (model exists, ffmpeg has libtorch via rpath)."""
+    return SR_MODEL_PATH.exists()
 
 
 def _logo_url_filter(url: str) -> str:
