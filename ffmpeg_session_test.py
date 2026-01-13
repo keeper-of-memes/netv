@@ -265,8 +265,8 @@ class TestStopSession:
         # VOD session should still exist because it was recently accessed
         assert session_id in _transcode_sessions
 
-    def test_stop_session_kills_live_immediately(self):
-        """Live sessions kill immediately, no grace period."""
+    def test_stop_session_skips_recent_live(self):
+        """Live sessions also get grace period for multi-user support."""
         with tempfile.TemporaryDirectory() as tmp:
             session_id = "test-live"
             with _transcode_lock:
@@ -282,8 +282,8 @@ class TestStopSession:
             with patch("ffmpeg_session.get_live_cache_timeout", return_value=0):
                 stop_session(session_id, force=False)
 
-            # Live session should be killed immediately, no grace period
-            assert session_id not in _transcode_sessions
+            # Live session should still exist because it was recently accessed
+            assert session_id in _transcode_sessions
 
     def test_stop_session_caches_vod(self):
         """Stop caches VOD session instead of removing it."""

@@ -157,14 +157,10 @@ def stop_session(session_id: str, force: bool = False) -> None:
         if not session:
             return
 
-        # Skip stop if VOD session was accessed recently (race with seeking/resume)
-        # Live streams kill immediately - no resume needed
-        if (
-            not force
-            and session.get("is_vod")
-            and time.time() - session.get("last_access", 0) < 5.0
-        ):
-            log.info("Ignoring stop for recently-accessed VOD session %s", session_id)
+        # Skip stop if session was accessed recently (race with seeking/resume,
+        # or multiple users watching same stream)
+        if not force and time.time() - session.get("last_access", 0) < 5.0:
+            log.info("Ignoring stop for recently-accessed session %s", session_id)
             return
 
         if _kill_process(session["process"]):
