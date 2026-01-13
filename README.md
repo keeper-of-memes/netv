@@ -60,6 +60,22 @@ Extensively optimized for minimal latency and CPU usage:
 
 Hardware transcoding is auto-detected. Check Settings to see available encoders.
 
+### 4K AI Upscaling
+
+Real-time 4x upscaling using Real-ESRGAN via TensorRT. Transforms 480p/720p/1080p
+content to pristine 4K at 85fps (RTX 5090). Perfect for older shows and low-bitrate streams.
+
+| Before (720p source) | After (4K AI Upscale) |
+|---|---|
+| ![Before](screenshots/ai-upscale_price-is-right_disabled.png) | ![After](screenshots/ai-upscale_price-is-right_enabled.png) |
+| ![Before](screenshots/ai-upscale_cleopatra_disabled.png) | ![After](screenshots/ai-upscale_cleopatra_enabled.png) |
+| ![Before](screenshots/ai-upscale_batman_disabled.png) | ![After](screenshots/ai-upscale_batman_enabled.png) |
+
+Requires NVIDIA GPU and [Dockerfile.ai_upscale](#ai-upscale-image-nvidia-gpu) build.
+The Settings page shows AI Upscale options when TensorRT engines are available.
+
+### Hardware Support
+
 - **Intel/AMD (VAAPI)**: Works automatically if `/dev/dri` exists.
 - **NVIDIA**: Requires [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
   and **driver 570+** (NVENC API 13): `docker compose --profile nvidia up -d`
@@ -113,6 +129,7 @@ users who find them overkill and just want a simple IPTV player.
 | **NVENC** | ✅ | ❌ | ✅ | ✅ | ⚠️ Pass |
 | **VAAPI** | ✅ | ❌ | ✅ | ✅ | ⚠️ Pass |
 | **QSV** | ✅ | ❌ | ✅ | ✅ | ⚠️ Pass |
+| **AI Upscale (4x)** | ✅ TensorRT | ❌ | ⚠️ Plugin | ❌ | ❌ |
 | **Software fallback** | ✅ | ❌ Browser | ✅ | ✅ | ✅ |
 | **Legacy GPU** | ✅ Any | ❌ No (browser) | ✅ Any | ✅ Any | ⚠️ Driver 450+ |
 | **ffprobe caching** | ✅ Dynamic | ❌ None | ⚠️ Offline | ⚠️ Offline | ⚠️ Offline |
