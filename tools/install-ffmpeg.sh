@@ -1,8 +1,11 @@
 #!/bin/bash
 # Build ffmpeg from source with hardware acceleration support
-# Supports: NVIDIA NVENC, AMD AMF, Intel QSV/VAAPI, LibTorch DNN
+# Supports: NVIDIA NVENC, AMD AMF, Intel QSV/VAAPI, LibTorch DNN, TensorRT DNN
 # https://trac.ffmpeg.org/wiki/CompilationGuide/Ubuntu
 set -e
+
+# Capture script directory before any cd commands
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # =============================================================================
 # Potentially Viable Pre-built FFmpeg alternatives
@@ -136,22 +139,23 @@ set -e
 # Hardware acceleration (set to 1 to enable)
 ENABLE_NVIDIA_CUDA=${ENABLE_NVIDIA_CUDA:-1}  # NVENC/NVDEC hardware encoding/decoding
 ENABLE_AMD_AMF=${ENABLE_AMD_AMF:-1}          # AMD AMF hardware encoding (requires AMD GPU)
-ENABLE_LIBTORCH=${ENABLE_LIBTORCH:-1}              # LibTorch DNN backend for AI filters
+ENABLE_LIBTORCH=${ENABLE_LIBTORCH:-0}        # LibTorch DNN backend for AI filters (default off, prefer TensorRT)
+ENABLE_TENSORRT=${ENABLE_TENSORRT:-1}        # TensorRT DNN backend for AI filters (fastest)
 
 # LibTorch CUDA variant (only used if ENABLE_LIBTORCH=1)
 # LIBTORCH_VARIANT options:
-#   "cu124"   - (default) CUDA 12.4 - required for FFmpeg compatibility (initXPU API)
-#               Note: cu124 binaries work on CUDA 12.4+ runtimes (forward compatible)
+#   "cu126"   - (default) CUDA 12.6 - compatible with LibTorch 2.7+
+#               Note: cu126 binaries work on CUDA 12.6+ runtimes (forward compatible)
 #   "auto"    - auto-detect from CUDA_VERSION, rounding minor to nearest even
 #               (PyTorch only releases cu126, cu128, cu130 - even minor versions)
 #               Examples: CUDA 12.9 -> cu128, CUDA 12.7 -> cu126, CUDA 13.x -> cu130
-#               WARNING: auto may select LibTorch 2.6.0+ which breaks FFmpeg (initXPU->init rename)
 #   "cpu"     - CPU-only (no GPU acceleration for DNN filters)
+#   "cu124"   - CUDA 12.4 (for older LibTorch 2.5.x)
 #   "cu126"   - force CUDA 12.6
 #   "cu128"   - force CUDA 12.8
 #   "cu130"   - force CUDA 13.0
 #   "rocm6.4" - AMD ROCm 6.4 (requires ROCm installed on host)
-LIBTORCH_VARIANT=${LIBTORCH_VARIANT:-cu124}
+LIBTORCH_VARIANT=${LIBTORCH_VARIANT:-cu126}
 
 # Optional build components (set to 0 to use apt package instead)
 BUILD_LIBPLACEBO=${BUILD_LIBPLACEBO:-1}  # GPU HDR tone mapping (requires Vulkan SDK)
@@ -254,6 +258,7 @@ APT_PACKAGES=(
 [ "$BUILD_LIBVA" != "1" ] && APT_PACKAGES+=(libva-dev)
 [ "$BUILD_LIBJXL" != "1" ] && APT_PACKAGES+=(libjxl-dev)
 [ "$BUILD_LIBX264" != "1" ] && APT_PACKAGES+=(libx264-dev)
+[ "$ENABLE_TENSORRT" = "1" ] && APT_PACKAGES+=(libnvinfer-dev libnvinfer-headers-dev libnvinfer-plugin-dev)
 if [ "$SKIP_DEPS" != "1" ]; then
     sudo apt-get update && sudo apt-get install -y "${APT_PACKAGES[@]}"
 fi
@@ -655,7 +660,7 @@ fi
 #       Use 2.7.0+ for RTX 50-series (Blackwell/SM 12.0) support.
 LIBTORCH_FLAGS=()
 if [ "$ENABLE_LIBTORCH" = "1" ]; then
-    LIBTORCH_VERSION=${LIBTORCH_VERSION:-2.5.0}
+    LIBTORCH_VERSION=${LIBTORCH_VERSION:-2.7.0}
     LIBTORCH_DIR="$SRC_DIR/libtorch"
 
     # Determine LibTorch CUDA variant
@@ -689,9 +694,13 @@ if [ "$ENABLE_LIBTORCH" = "1" ]; then
         cd "$SRC_DIR"
         rm -rf libtorch libtorch.zip
 
-        # Download from pytorch.org (CXX11 ABI version required for modern compilers)
-        # Format: https://download.pytorch.org/libtorch/{variant}/libtorch-cxx11-abi-shared-with-deps-{version}%2B{variant}.zip
-        LIBTORCH_URL="https://download.pytorch.org/libtorch/${TORCH_VARIANT}/libtorch-cxx11-abi-shared-with-deps-${LIBTORCH_VERSION}%2B${TORCH_VARIANT}.zip"
+        # Download from pytorch.org
+        # cu124 and earlier use cxx11-abi prefix, cu130+ dropped it
+        if [[ "$TORCH_VARIANT" == cu13* ]] || [[ "$TORCH_VARIANT" == cu14* ]]; then
+            LIBTORCH_URL="https://download.pytorch.org/libtorch/${TORCH_VARIANT}/libtorch-shared-with-deps-${LIBTORCH_VERSION}%2B${TORCH_VARIANT}.zip"
+        else
+            LIBTORCH_URL="https://download.pytorch.org/libtorch/${TORCH_VARIANT}/libtorch-cxx11-abi-shared-with-deps-${LIBTORCH_VERSION}%2B${TORCH_VARIANT}.zip"
+        fi
         wget -q -O libtorch.zip "$LIBTORCH_URL"
         unzip -q libtorch.zip
         rm -f libtorch.zip
@@ -768,11 +777,23 @@ if [ "$ENABLE_LIBTORCH" = "1" ]; then
     if [ -f "$TORCH_BACKEND" ] && ! grep -q "device.is_cuda()" "$TORCH_BACKEND"; then
         echo "Patching ffmpeg torch backend for CUDA support..."
         # Add CUDA device support between XPU and the catch-all error
+        # Also adds dlopen for libtorch_cuda.so to load CUDA kernels at runtime
         sed -i '/at::detail::getXPUHooks().init/a\
     } else if (device.is_cuda()) {\
         if (!at::cuda::is_available()) {\
             av_log(ctx, AV_LOG_ERROR, "No CUDA device found\\n");\
             goto fail;\
+        }\
+        // Load CUDA kernels - required for libtorch CUDA ops\
+        static bool cuda_lib_loaded = false;\
+        if (!cuda_lib_loaded) {\
+            cuda_lib_loaded = true;\
+            void *cuda_handle = dlopen("libtorch_cuda.so", RTLD_NOW | RTLD_GLOBAL);\
+            if (cuda_handle) {\
+                av_log(ctx, AV_LOG_DEBUG, "libtorch_cuda.so loaded\\n");\
+            } else {\
+                av_log(ctx, AV_LOG_WARNING, "Failed to load libtorch_cuda.so: %s\\n", dlerror());\
+            }\
         }' "$TORCH_BACKEND"
         # Add required CUDA header
         if ! grep -q "#include <ATen/cuda/CUDAContext.h>" "$TORCH_BACKEND"; then
@@ -780,6 +801,151 @@ if [ "$ENABLE_LIBTORCH" = "1" ]; then
         fi
         echo "Torch CUDA patch applied"
     fi
+
+    # Patch 3: Add TensorRT support (load runtime + handle tuple outputs)
+    if [ -f "$TORCH_BACKEND" ] && ! grep -q "isTuple" "$TORCH_BACKEND"; then
+        echo "Patching ffmpeg torch backend for TensorRT support..."
+
+        # Add dlfcn.h header for dlopen
+        if ! grep -q "#include <dlfcn.h>" "$TORCH_BACKEND"; then
+            sed -i '/#include <torch\/script.h>/a #include <dlfcn.h>' "$TORCH_BACKEND"
+        fi
+
+        # Add TensorRT runtime loading in model init (before torch::jit::load)
+        if ! grep -q "libtorchtrt_runtime" "$TORCH_BACKEND"; then
+            sed -i '/torch::jit::load(ctx->model_filename)/i\
+    // Load TensorRT runtime if available (enables TRT-compiled models)\
+    static bool trt_init_attempted = false;\
+    if (!trt_init_attempted) {\
+        trt_init_attempted = true;\
+        void *trt_handle = dlopen("libtorchtrt_runtime.so", RTLD_NOW | RTLD_GLOBAL);\
+        if (trt_handle) {\
+            av_log(ctx, AV_LOG_INFO, "TensorRT runtime loaded\\n");\
+        }\
+    }' "$TORCH_BACKEND"
+        fi
+
+        # Change forward().toTensor() to handle TRT tuple outputs
+        sed -i 's/\*infer_request->output = th_model->jit_model->forward(inputs)\.toTensor();/auto _fwd_out = th_model->jit_model->forward(inputs);\
+    if (_fwd_out.isTuple()) {\
+        *infer_request->output = _fwd_out.toTuple()->elements()[0].toTensor();\
+    } else {\
+        *infer_request->output = _fwd_out.toTensor();\
+    }/' "$TORCH_BACKEND"
+
+        # Fix device detection for TRT models (they may not have parameters)
+        sed -i 's/c10::Device device = (\*th_model->jit_model->parameters()\.begin())\.device();/c10::Device device = torch::kCUDA;\
+    auto params = th_model->jit_model->parameters();\
+    if (params.begin() != params.end()) {\
+        device = (*params.begin()).device();\
+    }/' "$TORCH_BACKEND"
+
+        echo "Torch TensorRT patch applied"
+    fi
+fi
+
+# TensorRT native backend (no libtorch dependency)
+# Loads pre-compiled .engine files directly for maximum performance
+TENSORRT_FLAGS=()
+if [ "$ENABLE_TENSORRT" = "1" ]; then
+    echo "Patching FFmpeg for native TensorRT DNN backend..."
+    PATCH_DIR="$SCRIPT_DIR/patches"
+
+    # Copy TensorRT backend source file
+    if [ -f "$PATCH_DIR/dnn_backend_tensorrt.cpp" ]; then
+        cp "$PATCH_DIR/dnn_backend_tensorrt.cpp" "$FFMPEG_DIR/libavfilter/dnn/"
+        echo "Copied dnn_backend_tensorrt.cpp"
+    else
+        echo "WARNING: dnn_backend_tensorrt.cpp not found in $PATCH_DIR"
+    fi
+
+    # Copy CUDA kernels for GPU-resident format conversion (zero-copy)
+    if [ -f "$PATCH_DIR/dnn_cuda_kernels.cu" ]; then
+        cp "$PATCH_DIR/dnn_cuda_kernels.cu" "$FFMPEG_DIR/libavfilter/dnn/"
+        cp "$PATCH_DIR/dnn_cuda_kernels.h" "$FFMPEG_DIR/libavfilter/dnn/"
+        echo "Copied CUDA format conversion kernels"
+    else
+        echo "WARNING: dnn_cuda_kernels.cu not found in $PATCH_DIR"
+    fi
+
+    # Copy patched vf_dnn_processing.c for CUDA frame support
+    if [ -f "$PATCH_DIR/vf_dnn_processing.c" ]; then
+        cp "$PATCH_DIR/vf_dnn_processing.c" "$FFMPEG_DIR/libavfilter/"
+        echo "Copied vf_dnn_processing.c with CUDA frame support"
+    fi
+
+    # Patch dnn_interface.h to add DNN_TRT enum and TRTOptions
+    DNN_INTERFACE_H="$FFMPEG_DIR/libavfilter/dnn_interface.h"
+    if [ -f "$DNN_INTERFACE_H" ] && ! grep -q "DNN_TRT" "$DNN_INTERFACE_H"; then
+        # Add DNN_TRT to enum
+        sed -i 's/DNN_TH = 1 << 2$/DNN_TH = 1 << 2,\n    DNN_TRT = 1 << 3/' "$DNN_INTERFACE_H"
+        # Add TRTOptions struct after THOptions
+        sed -i '/^} THOptions;$/a\
+\
+typedef struct TRTOptions {\
+    const AVClass *clazz;\
+    int device_id;\
+} TRTOptions;' "$DNN_INTERFACE_H"
+        # Add trt_option to DnnContext (after torch_option)
+        sed -i '/#if CONFIG_LIBTORCH/,/#endif/{
+            /#endif/a\
+#if CONFIG_LIBTENSORRT\
+    TRTOptions trt_option;\
+#endif
+        }' "$DNN_INTERFACE_H"
+        echo "Patched dnn_interface.h"
+    fi
+
+    # Patch dnn_interface.c to register TensorRT backend
+    DNN_INTERFACE_C="$FFMPEG_DIR/libavfilter/dnn/dnn_interface.c"
+    if [ -f "$DNN_INTERFACE_C" ] && ! grep -q "ff_dnn_backend_tensorrt" "$DNN_INTERFACE_C"; then
+        # Add extern declaration
+        sed -i '/extern const DNNModule ff_dnn_backend_torch;/a extern const DNNModule ff_dnn_backend_tensorrt;' "$DNN_INTERFACE_C"
+        # Add to backend list
+        sed -i '/#if CONFIG_LIBTORCH/,/#endif/{
+            /#endif/a\
+#if CONFIG_LIBTENSORRT\
+        {offsetof(DnnContext, trt_option), .module = \&ff_dnn_backend_tensorrt},\
+#endif
+        }' "$DNN_INTERFACE_C"
+        echo "Patched dnn_interface.c"
+    fi
+
+    # Patch dnn/Makefile to add TensorRT objects and CUDA kernel compilation
+    DNN_MAKEFILE="$FFMPEG_DIR/libavfilter/dnn/Makefile"
+    if [ -f "$DNN_MAKEFILE" ] && ! grep -q "CONFIG_LIBTENSORRT" "$DNN_MAKEFILE"; then
+        # Add TensorRT backend object
+        sed -i '/CONFIG_LIBTORCH.*dnn_backend_torch/a DNN-OBJS-$(CONFIG_LIBTENSORRT)             += dnn/dnn_backend_tensorrt.o' "$DNN_MAKEFILE"
+        # Add CUDA kernels object
+        sed -i '/dnn_backend_tensorrt.o/a DNN-OBJS-$(CONFIG_LIBTENSORRT)               += dnn/dnn_cuda_kernels.o' "$DNN_MAKEFILE"
+        # Add CUDA kernel compilation rule (compile to object, not PTX)
+        echo '' >> "$DNN_MAKEFILE"
+        echo '# CUDA kernel compilation rule - compile to object file (not PTX)' >> "$DNN_MAKEFILE"
+        echo 'libavfilter/dnn/dnn_cuda_kernels.o: libavfilter/dnn/dnn_cuda_kernels.cu' >> "$DNN_MAKEFILE"
+        echo '	$(NVCC) -c -o $@ $< -m64 --compiler-options '"'"'-fPIC'"'"' -I$(SRC_PATH)' >> "$DNN_MAKEFILE"
+        echo "Patched dnn/Makefile with TensorRT and CUDA kernel support"
+    fi
+
+    # Patch configure to add --enable-libtensorrt option
+    CONFIGURE="$FFMPEG_DIR/configure"
+    if [ -f "$CONFIGURE" ] && ! grep -q "enable-libtensorrt" "$CONFIGURE"; then
+        # Add help text
+        sed -i '/--enable-libtorch.*enable Torch/a\  --enable-libtensorrt     enable TensorRT as one DNN backend [no]' "$CONFIGURE"
+        # Add to library list
+        sed -i '/^    libtorch$/a\    libtensorrt' "$CONFIGURE"
+        # Add to dnn_deps_any
+        sed -i 's/dnn_deps_any="libtensorflow libopenvino libtorch"/dnn_deps_any="libtensorflow libopenvino libtorch libtensorrt"/' "$CONFIGURE"
+        # Add library check (after libtorch check)
+        # Use nvinfer1::Dims which is a simple struct that can be default-constructed
+        sed -i '/enabled libtorch.*require_cxx libtorch/a\
+enabled libtensorrt       \&\& check_cxxflags -std=c++17 \&\& require_cxx libtensorrt NvInfer.h "nvinfer1::Dims" \\\
+                             -lnvinfer -lcudart -lstdc++ \&\&\
+                             add_extralibs -lnvinfer_plugin' "$CONFIGURE"
+        echo "Patched configure"
+    fi
+
+    TENSORRT_FLAGS=(--enable-libtensorrt)
+    echo "TensorRT DNN backend patches applied"
 fi
 
 cd "$FFMPEG_DIR" && \
@@ -806,6 +972,12 @@ if [ "$ENABLE_LIBTORCH" = "1" ]; then
     fi
     EXTRA_LDFLAGS="$EXTRA_LDFLAGS -L$LIB_DIR -Wl,-rpath,$LIB_DIR"
 fi
+if [ "$ENABLE_TENSORRT" = "1" ]; then
+    # TensorRT needs C++ flags with CUDA headers (uses require_cxx for detection)
+    if [ "$ENABLE_NVIDIA_CUDA" = "1" ]; then
+        EXTRA_CXXFLAGS="$EXTRA_CXXFLAGS -I$CUDA_PATH/include"
+    fi
+fi
 CONFIGURE_CMD=(
     ./configure
     --prefix="$BUILD_DIR"
@@ -813,7 +985,7 @@ CONFIGURE_CMD=(
     --extra-cflags="$EXTRA_CFLAGS"
     --extra-cxxflags="$EXTRA_CXXFLAGS"
     --extra-ldflags="$EXTRA_LDFLAGS"
-    --extra-libs="-lpthread -lm${TORCH_EXTRA_LIBS:+ $TORCH_EXTRA_LIBS}"
+    --extra-libs="-lpthread -lm -ldl${TORCH_EXTRA_LIBS:+ $TORCH_EXTRA_LIBS}"
     --ld="g++"
     --bindir="$BIN_DIR"
     --disable-debug
@@ -851,6 +1023,7 @@ CONFIGURE_CMD=(
     "${CUDA_FLAGS[@]}"
     "${AMF_FLAGS[@]}"
     "${LIBTORCH_FLAGS[@]}"
+    "${TENSORRT_FLAGS[@]}"
 )
 
 if [ "$BUILD_LIBPLACEBO" = "1" ]; then

@@ -557,6 +557,34 @@
         </div>
         <p class="text-xs text-gray-400 mt-1">Maximum quality ceiling (won't use more bits than source provides)</p>
       </div>
+      {% if sr_available %}
+      <div>
+        <label class="block text-sm font-medium mb-2">Super-Resolution (AI Upscale)</label>
+        <div class="flex flex-wrap gap-4">
+          <label class="flex items-center gap-2 cursor-pointer text-sm">
+            <input type="radio" name="sr_mode" value="off" {% if sr_mode == 'off' or not sr_mode %}checked{% endif %}
+                   class="setting-input w-4 h-4 bg-gray-700 border-gray-600 text-blue-500 focus:ring-blue-500">
+            <span>Off</span>
+          </label>
+          <label class="flex items-center gap-2 cursor-pointer text-sm">
+            <input type="radio" name="sr_mode" value="enhance" {% if sr_mode == 'enhance' %}checked{% endif %}
+                   class="setting-input w-4 h-4 bg-gray-700 border-gray-600 text-blue-500 focus:ring-blue-500">
+            <span>Enhance All</span>
+          </label>
+          <label class="flex items-center gap-2 cursor-pointer text-sm">
+            <input type="radio" name="sr_mode" value="upscale_1080" {% if sr_mode == 'upscale_1080' %}checked{% endif %}
+                   class="setting-input w-4 h-4 bg-gray-700 border-gray-600 text-blue-500 focus:ring-blue-500">
+            <span>Upscale to 1080p</span>
+          </label>
+          <label class="flex items-center gap-2 cursor-pointer text-sm">
+            <input type="radio" name="sr_mode" value="upscale_4k" {% if sr_mode == 'upscale_4k' %}checked{% endif %}
+                   class="setting-input w-4 h-4 bg-gray-700 border-gray-600 text-blue-500 focus:ring-blue-500">
+            <span>Upscale to 4K</span>
+          </label>
+        </div>
+        <p class="text-xs text-gray-400 mt-1">Real-ESRGAN AI upscaling (CPU intensive, requires NVIDIA GPU for encoding)</p>
+      </div>
+      {% endif %}
       <div>
         <label class="block text-sm font-medium mb-2">VOD Transcode Cache (minutes)</label>
         <input type="number" name="vod_transcode_cache_mins" value="{{ vod_transcode_cache_mins }}"
