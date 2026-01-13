@@ -192,7 +192,13 @@ def _build_sr_filter(sr_mode: str, source_height: int, target_height: int) -> st
 
     # Select engine based on source resolution (TensorRT needs fixed input dimensions)
     # Scale input to match engine, apply SR (4x), then scale to target
-    if source_height <= 540:
+    # Default to 720p engine if probe failed (source_height <= 0)
+    if source_height <= 0:
+        # Probe failed - default to 720p engine (good middle ground)
+        log.warning("SR: probe failed (height=%d), defaulting to 720p engine", source_height)
+        engine_name = "realesrgan_720p_fp16.engine"
+        engine_height, engine_width = 720, 1280
+    elif source_height <= 540:
         engine_name = "realesrgan_480p_fp16.engine"
         engine_height, engine_width = 480, 848  # 16:9 rounded to 8
     elif source_height <= 900:
@@ -207,16 +213,19 @@ def _build_sr_filter(sr_mode: str, source_height: int, target_height: int) -> st
     # Build SR filter chain:
     # 1. Scale to engine's expected input size (preserving aspect with padding if needed)
     # 2. Convert to RGB (model expects 3-channel RGB input)
-    # 3. Apply SR via TensorRT dnn_processing (outputs 4x resolution)
-    # 4. Scale to target using Area algorithm (best for downscaling)
+    # 3. hwupload to GPU (critical for performance - keeps data on GPU)
+    # 4. Apply SR via TensorRT dnn_processing (outputs 4x resolution on GPU)
+    # 5. Scale down on GPU to target resolution
     sr_filter = (
         f"scale={engine_width}:{engine_height}:force_original_aspect_ratio=decrease,"
         f"pad={engine_width}:{engine_height}:(ow-iw)/2:(oh-ih)/2,"
         f"format=rgb24,"
-        f"dnn_processing=dnn_backend=tensorrt:model={engine_path}"
+        f"hwupload,"
+        f"dnn_processing=dnn_backend=8:model={engine_path}"
     )
     if target_height:
-        sr_filter += f",scale=-2:{target_height}:flags=area"
+        # After dnn_processing, data is on GPU - use scale_cuda with explicit params
+        sr_filter += f",scale_cuda=w=-2:h={target_height}"
     return sr_filter
 
 
@@ -862,9 +871,12 @@ def _build_video_args(
             # HDR tone mapping: prefer libplacebo (Vulkan GPU), fall back to CPU zscale+tonemap
             # Deinterlace before tonemap (CPU yadif) for consistency with hw decode path
             if sr_filter:
-                # SR path: CPU decode -> deinterlace -> SR -> scale -> upload
+                # SR path: CPU decode -> deinterlace -> SR (GPU) -> encode
+                # SR filter ends with scale_cuda, outputs CUDA frames ready for nvenc
+                # Need init_hw_device for TensorRT dnn_processing to use GPU
+                pre = ["-init_hw_device", "cuda=cu", "-filter_hw_device", "cu"]
                 deint = "yadif=0," if deinterlace else ""
-                vf = f"{deint}{sr_filter},format=nv12,hwupload_cuda,{scale}"
+                vf = f"{deint}{sr_filter}"
             elif is_hdr:
                 deint = "yadif=0," if deinterlace else ""  # CPU deinterlace before tonemap
                 if _has_libplacebo_filter():
@@ -1060,7 +1072,7 @@ def build_hls_ffmpeg_cmd(
     needs_scale = media_info and media_info.height > max_h
 
     # SR requires re-encode (can't copy video when SR is active)
-    sr_active = is_vod and sr_mode != "off" and _sr_engine_dir
+    sr_active = sr_mode != "off" and _sr_engine_dir
 
     copy_video = bool(
         media_info
@@ -1108,7 +1120,7 @@ def build_hls_ffmpeg_cmd(
         max_resolution=max_resolution,
         quality=quality,
         is_hdr=media_info.is_hdr if media_info else False,
-        sr_mode=sr_mode if is_vod else "off",
+        sr_mode=sr_mode,
         source_height=media_info.height if media_info else 0,
     )
     audio_args = _build_audio_args(
