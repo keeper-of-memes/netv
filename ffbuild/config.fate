@@ -1,1 +1,0 @@
-config:x86:x86_64:generic:linux:gcc 13 (Ubuntu 13.3.0-6ubuntu2~24.04):--prefix=/home/jvdillon/ffmpeg_build --extra-cxxflags=-I/usr/local/cuda/include --extra-cflags='-I/home/jvdillon/ffmpeg_build/include -I/usr/local/cuda/include' --extra-ldflags='-L/home/jvdillon/ffmpeg_build/lib -L/usr/local/cuda/lib64' --ld=g++ --enable-gpl --enable-version3 --enable-libtensorrt
