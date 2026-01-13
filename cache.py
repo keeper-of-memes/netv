@@ -339,8 +339,8 @@ def detect_encoders() -> dict[str, bool]:
         "vaapi": False,
     }
 
-    # Test input: 1 frame of 64x64 black
-    test_input = ["-f", "lavfi", "-i", "color=black:s=64x64:d=0.04", "-frames:v", "1"]
+    # Test input: 1 frame of 256x256 black (64x64 is below NVENC minimum on newer GPUs)
+    test_input = ["-f", "lavfi", "-i", "color=black:s=256x256:d=0.04", "-frames:v", "1"]
     base_cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
     null_out = ["-f", "null", "-"]
 

@@ -722,13 +722,17 @@ def _build_video_args(
     # Parse hw into encoder and fallback
     enc_type, fallback = _parse_hw(hw)
 
-    # Fail loudly if VAAPI is needed but no device was detected
+    # Fall back gracefully if VAAPI is needed but no device was detected
     needs_vaapi = enc_type == "vaapi" or fallback == "vaapi"
     if needs_vaapi and not VAAPI_DEVICE:
-        raise RuntimeError(
-            f"Hardware acceleration '{hw}' requires VAAPI but no Intel/AMD GPU was detected. "
-            "Select a different hardware option in settings."
-        )
+        if enc_type == "vaapi":
+            # Pure VAAPI encoder requested but not available - fall back to software
+            log.warning("VAAPI unavailable (no Intel/AMD GPU), falling back to software encoding")
+            enc_type = "software"
+        else:
+            # VAAPI fallback requested but not available - use software decode instead
+            log.warning("VAAPI fallback unavailable (no Intel/AMD GPU), using software decode")
+        fallback = "software"
 
     # Height expr for scale filter (scale down only, -2 keeps width divisible by 2)
     max_h = _MAX_RES_HEIGHT.get(max_resolution)
