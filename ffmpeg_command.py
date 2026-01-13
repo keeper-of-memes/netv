@@ -241,12 +241,15 @@ def get_user_agent() -> str | None:
 
 
 def get_transcode_dir() -> pathlib.Path:
-    """Get the transcode output directory. Falls back to system temp if not set."""
+    """Get the transcode output directory. Falls back to system temp if not set or inaccessible."""
     custom_dir = _load_settings().get("transcode_dir", "")
     if custom_dir:
         path = pathlib.Path(custom_dir)
-        path.mkdir(parents=True, exist_ok=True)
-        return path
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            return path
+        except (PermissionError, OSError) as e:
+            log.warning("Transcode dir %s inaccessible (%s), using temp dir", custom_dir, e)
     return pathlib.Path(tempfile.gettempdir())
 
 
