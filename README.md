@@ -60,8 +60,19 @@ Extensively optimized for minimal latency and CPU usage:
 Hardware transcoding is auto-detected. Check Settings to see available encoders.
 
 - **Intel/AMD (VAAPI)**: Works automatically if `/dev/dri` exists.
-- **NVIDIA**: Requires [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html):
-  `docker compose --profile nvidia up -d`
+- **NVIDIA**: Requires [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+  and **driver 570+** (NVENC API 13): `docker compose --profile nvidia up -d`
+
+  <details>
+  <summary>Stuck on driver 550? (Synology, Unraid, etc.)</summary>
+
+  The pre-built image requires driver 570+. For older drivers, build with CUDA 12.4:
+  ```bash
+  docker build --build-arg CUDA_VERSION=12-4 -f Dockerfile.ffmpeg -t netv-ffmpeg:local .
+  docker build --build-arg FFMPEG_IMAGE=netv-ffmpeg:local -t netv:local .
+  ```
+  Then update your `docker-compose.yml` to use `netv:local` instead of the ghcr image.
+  </details>
 - **No GPU / VPS**: If `/dev/dri` doesn't exist, comment out the `devices` section
   in `docker-compose.yml` or compose will fail to start
 
