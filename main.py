@@ -120,9 +120,7 @@ TEMPLATES.env.auto_reload = True
 
 # Super-resolution engine directory (TensorRT engines for different resolutions)
 SR_ENGINE_DIR = pathlib.Path(
-    os.environ.get(
-        "SR_ENGINE_DIR", pathlib.Path.home() / "ffmpeg_build/models"
-    )
+    os.environ.get("SR_ENGINE_DIR", pathlib.Path.home() / "ffmpeg_build/models")
 )
 
 

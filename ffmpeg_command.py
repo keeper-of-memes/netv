@@ -811,7 +811,6 @@ def _build_video_args(
         if sr_filter:
             use_hw_pipeline = False
 
-
     # Fall back gracefully if VAAPI is needed but no device was detected
     needs_vaapi = enc_type == "vaapi" or fallback == "vaapi"
     if needs_vaapi and not VAAPI_DEVICE:

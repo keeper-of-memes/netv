@@ -26,7 +26,6 @@ Example FFmpeg usage after export:
 
 import argparse
 import os
-import sys
 import tempfile
 import urllib.request
 
@@ -37,6 +36,7 @@ import torch.nn.functional as F
 
 class SRVGGNetCompact(nn.Module):
     """Compact SR network - fast inference, good quality."""
+
     def __init__(self, num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=32, upscale=4):
         super().__init__()
         self.upscale = upscale
@@ -55,11 +55,12 @@ class SRVGGNetCompact(nn.Module):
             out = layer(out)
         out = self.body[-1](out)
         out = self.upsampler(out)
-        return out + F.interpolate(x, scale_factor=self.upscale, mode='nearest')
+        return out + F.interpolate(x, scale_factor=self.upscale, mode="nearest")
 
 
 class ResidualDenseBlock(nn.Module):
     """Residual Dense Block for RRDBNet."""
+
     def __init__(self, nf=64, gc=32):
         super().__init__()
         self.conv1 = nn.Conv2d(nf, gc, 3, 1, 1)
@@ -80,6 +81,7 @@ class ResidualDenseBlock(nn.Module):
 
 class RRDB(nn.Module):
     """Residual in Residual Dense Block."""
+
     def __init__(self, nf, gc=32):
         super().__init__()
         self.rdb1 = ResidualDenseBlock(nf, gc)
@@ -95,7 +97,10 @@ class RRDB(nn.Module):
 
 class RRDBNet(nn.Module):
     """RRDBNet architecture for Real-ESRGAN - highest quality, slower."""
-    def __init__(self, num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4):
+
+    def __init__(
+        self, num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4
+    ):
         super().__init__()
         self.scale = scale
         self.conv_first = nn.Conv2d(num_in_ch, num_feat, 3, 1, 1)
@@ -111,21 +116,21 @@ class RRDBNet(nn.Module):
         feat = self.conv_first(x)
         body_feat = self.conv_body(self.body(feat))
         feat = feat + body_feat
-        feat = self.lrelu(self.conv_up1(F.interpolate(feat, scale_factor=2, mode='nearest')))
-        feat = self.lrelu(self.conv_up2(F.interpolate(feat, scale_factor=2, mode='nearest')))
+        feat = self.lrelu(self.conv_up1(F.interpolate(feat, scale_factor=2, mode="nearest")))
+        feat = self.lrelu(self.conv_up2(F.interpolate(feat, scale_factor=2, mode="nearest")))
         out = self.conv_last(self.lrelu(self.conv_hr(feat)))
         return out
 
 
 # Model URLs
 MODELS = {
-    'compact': {
-        'url': 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth',
-        'filename': 'realesr-general-x4v3.pth',
+    "compact": {
+        "url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth",
+        "filename": "realesr-general-x4v3.pth",
     },
-    'rrdbnet': {
-        'url': 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth',
-        'filename': 'RealESRGAN_x4plus.pth',
+    "rrdbnet": {
+        "url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
+        "filename": "RealESRGAN_x4plus.pth",
     },
 }
 
@@ -133,41 +138,45 @@ MODELS = {
 def download_model(model_type, cache_dir):
     """Download model weights."""
     info = MODELS[model_type]
-    path = os.path.join(cache_dir, info['filename'])
+    path = os.path.join(cache_dir, info["filename"])
     if os.path.exists(path):
         print(f"Using cached model: {path}")
         return path
 
     print(f"Downloading {info['filename']}...")
-    urllib.request.urlretrieve(info['url'], path)
+    urllib.request.urlretrieve(info["url"], path)
     print(f"Downloaded to {path}")
     return path
 
 
-def get_model(model_path=None, model_type='compact', cache_dir=None):
+def get_model(model_path=None, model_type="compact", cache_dir=None):
     """Load Real-ESRGAN model."""
     if cache_dir is None:
-        cache_dir = os.path.expanduser('~/.cache/realesrgan')
+        cache_dir = os.path.expanduser("~/.cache/realesrgan")
     os.makedirs(cache_dir, exist_ok=True)
 
     if model_path is None:
         model_path = download_model(model_type, cache_dir)
 
     print(f"Loading model from {model_path}")
-    state_dict = torch.load(model_path, map_location='cpu', weights_only=True)
-    if 'params_ema' in state_dict:
-        state_dict = state_dict['params_ema']
-    elif 'params' in state_dict:
-        state_dict = state_dict['params']
+    state_dict = torch.load(model_path, map_location="cpu", weights_only=True)
+    if "params_ema" in state_dict:
+        state_dict = state_dict["params_ema"]
+    elif "params" in state_dict:
+        state_dict = state_dict["params"]
 
     # Auto-detect model type from state dict
-    num_conv_layers = sum(1 for k, v in state_dict.items() if 'weight' in k and len(v.shape) == 4)
+    num_conv_layers = sum(1 for k, v in state_dict.items() if "weight" in k and len(v.shape) == 4)
 
     if num_conv_layers > 50:  # RRDBNet has many more conv layers
-        model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
+        model = RRDBNet(
+            num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4
+        )
         model_name = "RRDBNet"
     else:
-        model = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=num_conv_layers, upscale=4)
+        model = SRVGGNetCompact(
+            num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=num_conv_layers, upscale=4
+        )
         model_name = "SRVGGNetCompact"
 
     model.load_state_dict(state_dict)
@@ -183,28 +192,27 @@ def export_onnx(model, opt_shape, onnx_path):
     print(f"Exporting to ONNX: {onnx_path}")
     print(f"  Optimal shape: 1x3x{opt_h}x{opt_w}")
 
-    dummy_input = torch.randn(1, 3, opt_h, opt_w, device='cpu')
+    dummy_input = torch.randn(1, 3, opt_h, opt_w, device="cpu")
 
-    dynamic_axes = {
-        'input': {2: 'height', 3: 'width'},
-        'output': {2: 'out_height', 3: 'out_width'}
-    }
+    dynamic_axes = {"input": {2: "height", 3: "width"}, "output": {2: "out_height", 3: "out_width"}}
 
     torch.onnx.export(
         model,
         (dummy_input,),
         onnx_path,
-        input_names=['input'],
-        output_names=['output'],
+        input_names=["input"],
+        output_names=["output"],
         opset_version=17,
         do_constant_folding=True,
         dynamic_axes=dynamic_axes,
         dynamo=False,
     )
-    print(f"  ONNX export complete (dynamic H/W)")
+    print("  ONNX export complete (dynamic H/W)")
 
 
-def build_engine(onnx_path, engine_path, min_shape, opt_shape, max_shape, fp16=False, workspace_gb=4):
+def build_engine(
+    onnx_path, engine_path, min_shape, opt_shape, max_shape, fp16=False, workspace_gb=4
+):
     """Build TensorRT engine from ONNX model with dynamic shapes."""
     import tensorrt as trt
 
@@ -213,7 +221,7 @@ def build_engine(onnx_path, engine_path, min_shape, opt_shape, max_shape, fp16=F
     max_w, max_h = max_shape
 
     print(f"Building TensorRT engine: {engine_path}")
-    print(f"  Dynamic shapes:")
+    print("  Dynamic shapes:")
     print(f"    min: {min_w}x{min_h}")
     print(f"    opt: {opt_w}x{opt_h}")
     print(f"    max: {max_w}x{max_h}")
@@ -225,7 +233,7 @@ def build_engine(onnx_path, engine_path, min_shape, opt_shape, max_shape, fp16=F
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
     parser = trt.OnnxParser(network, logger)
 
-    with open(onnx_path, 'rb') as f:
+    with open(onnx_path, "rb") as f:
         if not parser.parse(f.read()):
             for i in range(parser.num_errors):
                 print(f"  ONNX parse error: {parser.get_error(i)}")
@@ -236,10 +244,9 @@ def build_engine(onnx_path, engine_path, min_shape, opt_shape, max_shape, fp16=F
 
     profile = builder.create_optimization_profile()
     input_name = network.get_input(0).name
-    profile.set_shape(input_name,
-                      min=(1, 3, min_h, min_w),
-                      opt=(1, 3, opt_h, opt_w),
-                      max=(1, 3, max_h, max_w))
+    profile.set_shape(
+        input_name, min=(1, 3, min_h, min_w), opt=(1, 3, opt_h, opt_w), max=(1, 3, max_h, max_w)
+    )
     config.add_optimization_profile(profile)
 
     if fp16:
@@ -254,13 +261,13 @@ def build_engine(onnx_path, engine_path, min_shape, opt_shape, max_shape, fp16=F
     if serialized_engine is None:
         raise RuntimeError("Failed to build TensorRT engine")
 
-    with open(engine_path, 'wb') as f:
+    with open(engine_path, "wb") as f:
         f.write(serialized_engine)
 
     print(f"  Engine saved: {engine_path} ({os.path.getsize(engine_path) / 1024 / 1024:.1f} MB)")
 
 
-def height_to_shape(h, aspect=16/9):
+def height_to_shape(h, aspect=16 / 9):
     """Convert height to (width, height) assuming aspect ratio."""
     w = int(h * aspect)
     w = (w + 7) // 8 * 8
@@ -268,29 +275,42 @@ def height_to_shape(h, aspect=16/9):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Export Real-ESRGAN to TensorRT')
-    parser.add_argument('--model', '-m', type=str, default=None,
-                        help='Path to PyTorch model (.pth). Downloads default if not specified.')
-    parser.add_argument('--model-type', type=str, default='compact', choices=['compact', 'rrdbnet'],
-                        help='Model type: compact (fast, default) or rrdbnet (slow, highest quality)')
-    parser.add_argument('--min-height', type=int, default=270,
-                        help='Minimum input height (default: 270)')
-    parser.add_argument('--opt-height', type=int, default=720,
-                        help='Optimal input height (default: 720)')
-    parser.add_argument('--max-height', type=int, default=1080,
-                        help='Maximum input height (default: 1080)')
-    parser.add_argument('--output', '-o', type=str, default=None,
-                        help='Output engine path')
-    parser.add_argument('--fp16', action='store_true', default=True,
-                        help='Enable FP16 precision (default: enabled)')
-    parser.add_argument('--fp32', action='store_true',
-                        help='Use FP32 precision instead of FP16')
-    parser.add_argument('--workspace', type=int, default=8,
-                        help='TensorRT workspace size in GB (default: 8)')
-    parser.add_argument('--keep-onnx', action='store_true',
-                        help='Keep intermediate ONNX file')
-    parser.add_argument('--onnx-only', action='store_true',
-                        help='Only export ONNX, skip TensorRT engine build')
+    parser = argparse.ArgumentParser(description="Export Real-ESRGAN to TensorRT")
+    parser.add_argument(
+        "--model",
+        "-m",
+        type=str,
+        default=None,
+        help="Path to PyTorch model (.pth). Downloads default if not specified.",
+    )
+    parser.add_argument(
+        "--model-type",
+        type=str,
+        default="compact",
+        choices=["compact", "rrdbnet"],
+        help="Model type: compact (fast, default) or rrdbnet (slow, highest quality)",
+    )
+    parser.add_argument(
+        "--min-height", type=int, default=270, help="Minimum input height (default: 270)"
+    )
+    parser.add_argument(
+        "--opt-height", type=int, default=720, help="Optimal input height (default: 720)"
+    )
+    parser.add_argument(
+        "--max-height", type=int, default=1080, help="Maximum input height (default: 1080)"
+    )
+    parser.add_argument("--output", "-o", type=str, default=None, help="Output engine path")
+    parser.add_argument(
+        "--fp16", action="store_true", default=True, help="Enable FP16 precision (default: enabled)"
+    )
+    parser.add_argument("--fp32", action="store_true", help="Use FP32 precision instead of FP16")
+    parser.add_argument(
+        "--workspace", type=int, default=8, help="TensorRT workspace size in GB (default: 8)"
+    )
+    parser.add_argument("--keep-onnx", action="store_true", help="Keep intermediate ONNX file")
+    parser.add_argument(
+        "--onnx-only", action="store_true", help="Only export ONNX, skip TensorRT engine build"
+    )
     args = parser.parse_args()
 
     if args.fp32:
@@ -304,7 +324,7 @@ def main():
     max_shape = height_to_shape(max_h)
 
     if args.output is None:
-        suffix = '_fp16' if args.fp16 else '_fp32'
+        suffix = "_fp16" if args.fp16 else "_fp32"
         args.output = f"realesrgan_{args.model_type}{suffix}.engine"
 
     print("=" * 60)
@@ -313,9 +333,9 @@ def main():
     model = get_model(args.model, args.model_type)
 
     if args.keep_onnx:
-        onnx_path = args.output.replace('.engine', '.onnx')
+        onnx_path = args.output.replace(".engine", ".onnx")
     else:
-        fd, onnx_path = tempfile.mkstemp(suffix='.onnx')
+        fd, onnx_path = tempfile.mkstemp(suffix=".onnx")
         os.close(fd)
 
     try:
@@ -327,12 +347,15 @@ def main():
             print(f"  trtexec --onnx={onnx_path} --saveEngine={args.output} --fp16")
             return
 
-        build_engine(onnx_path, args.output,
-                     min_shape=min_shape,
-                     opt_shape=opt_shape,
-                     max_shape=max_shape,
-                     fp16=args.fp16,
-                     workspace_gb=args.workspace)
+        build_engine(
+            onnx_path,
+            args.output,
+            min_shape=min_shape,
+            opt_shape=opt_shape,
+            max_shape=max_shape,
+            fp16=args.fp16,
+            workspace_gb=args.workspace,
+        )
     finally:
         if not args.keep_onnx and not args.onnx_only and os.path.exists(onnx_path):
             os.remove(onnx_path)
@@ -345,8 +368,10 @@ def main():
     print(f"Engine accepts input heights from {args.min_height} to {args.max_height} (16:9)")
     print()
     print("Usage with FFmpeg:")
-    print(f'  ffmpeg -i input.mp4 -vf "dnn_processing=dnn_backend=tensorrt:model={args.output}" output.mp4')
+    print(
+        f'  ffmpeg -i input.mp4 -vf "dnn_processing=dnn_backend=tensorrt:model={args.output}" output.mp4'
+    )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
