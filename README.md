@@ -165,16 +165,27 @@ Open http://localhost:8000. To update: `docker compose pull && docker compose up
 #### NVIDIA GPU (NVENC)
 
 Requires [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
-Use the image matching your driver version ([source](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html)):
 
-| Driver | CUDA | Install |
-|--------|------|---------|
-| 550 | 12-4 | *Dropped due to lack of Ubuntu support* |
-| 555 | 12-5 | `FFMPEG_IMAGE=ghcr.io/jvdillon/netv-ffmpeg:cuda12-5 docker compose --profile nvidia up -d` |
-| 560 | 12-6 | `FFMPEG_IMAGE=ghcr.io/jvdillon/netv-ffmpeg:cuda12-6 docker compose --profile nvidia up -d` |
-| 570 | 12-8 | `FFMPEG_IMAGE=ghcr.io/jvdillon/netv-ffmpeg:cuda12-8 docker compose --profile nvidia up -d` |
-| 580 | 13-0 | `FFMPEG_IMAGE=ghcr.io/jvdillon/netv-ffmpeg:cuda13-0 docker compose --profile nvidia up -d` |
-| 590 | 13-1 | `docker compose --profile nvidia up -d` |
+Check your driver and compute capability:
+```bash
+nvidia-smi --query-gpu=driver_version,compute_cap --format=csv,noheader
+# Example: 580.87.02, 8.6 → Driver 580, compute ≥7.5 → use cuda13-1
+```
+
+Find your CUDA version ([source](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html)):
+
+| Driver | < 7.5 (Maxwell/Pascal/Volta) | ≥ 7.5 (Turing+) |
+|--------|------------------------------|-----------------|
+| 555 | cuda12-5 | cuda12-5 |
+| 560 | cuda12-6 | cuda12-6 |
+| 570 | cuda12-9 | cuda12-9 |
+| 580 | cuda12-9 | cuda13-1 |
+| 590 | *unsupported* | cuda13-1 |
+
+Then run:
+```bash
+FFMPEG_IMAGE=ghcr.io/jvdillon/netv-ffmpeg:<cuda-version> docker compose --profile nvidia up -d
+```
 
 #### AI Upscale Image (NVIDIA GPU)
 
@@ -369,16 +380,7 @@ Hardware transcoding is auto-detected. Check Settings to see available encoders.
 
 - **Intel/AMD (VAAPI)**: Works automatically if `/dev/dri` exists.
 - **NVIDIA**: Requires [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
-  Use the image matching your driver version ([source](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html)):
-
-  | Driver | CUDA | Install |
-  |--------|------|---------|
-  | 550 | 12-4 | *Dropped due to lack of Ubuntu support* |
-  | 555 | 12-5 | `FFMPEG_IMAGE=ghcr.io/jvdillon/netv-ffmpeg:cuda12-5 docker compose --profile nvidia up -d` |
-  | 560 | 12-6 | `FFMPEG_IMAGE=ghcr.io/jvdillon/netv-ffmpeg:cuda12-6 docker compose --profile nvidia up -d` |
-  | 570 | 12-8 | `FFMPEG_IMAGE=ghcr.io/jvdillon/netv-ffmpeg:cuda12-8 docker compose --profile nvidia up -d` |
-  | 580 | 13-0 | `FFMPEG_IMAGE=ghcr.io/jvdillon/netv-ffmpeg:cuda13-0 docker compose --profile nvidia up -d` |
-  | 590 | 13-1 | `docker compose --profile nvidia up -d` |
+  See [NVIDIA GPU (NVENC)](#nvidia-gpu-nvenc) installation section for driver/compute compatibility table.
 - **No GPU / VPS**: If `/dev/dri` doesn't exist, comment out the `devices` section
   in `docker-compose.yml` or compose will fail to start
 
