@@ -396,6 +396,7 @@ sudo apt autoremove -y
 # Step 2: Add NVIDIA CUDA repository
 wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
 sudo dpkg -i cuda-keyring_1.1-1_all.deb
+sudo apt modernize-sources || true
 sudo apt update
 
 # Step 3: Install driver and CUDA toolkit
