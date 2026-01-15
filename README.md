@@ -169,7 +169,8 @@ Use the image matching your driver version ([source](https://docs.nvidia.com/cud
 
 | Driver | CUDA | Install |
 |--------|------|---------|
-| 550 | 12-4 | `FFMPEG_IMAGE=ghcr.io/jvdillon/netv-ffmpeg:cuda12-4 docker compose --profile nvidia up -d` |
+| 550 | 12-4 | *Dropped due to lack of Ubuntu support* |
+| 555 | 12-5 | `FFMPEG_IMAGE=ghcr.io/jvdillon/netv-ffmpeg:cuda12-5 docker compose --profile nvidia up -d` |
 | 560 | 12-6 | `FFMPEG_IMAGE=ghcr.io/jvdillon/netv-ffmpeg:cuda12-6 docker compose --profile nvidia up -d` |
 | 570 | 12-8 | `FFMPEG_IMAGE=ghcr.io/jvdillon/netv-ffmpeg:cuda12-8 docker compose --profile nvidia up -d` |
 | 580 | 13-0 | `FFMPEG_IMAGE=ghcr.io/jvdillon/netv-ffmpeg:cuda13-0 docker compose --profile nvidia up -d` |
@@ -372,7 +373,8 @@ Hardware transcoding is auto-detected. Check Settings to see available encoders.
 
   | Driver | CUDA | Install |
   |--------|------|---------|
-  | 550 | 12-4 | `FFMPEG_IMAGE=ghcr.io/jvdillon/netv-ffmpeg:cuda12-4 docker compose --profile nvidia up -d` |
+  | 550 | 12-4 | *Dropped due to lack of Ubuntu support* |
+  | 555 | 12-5 | `FFMPEG_IMAGE=ghcr.io/jvdillon/netv-ffmpeg:cuda12-5 docker compose --profile nvidia up -d` |
   | 560 | 12-6 | `FFMPEG_IMAGE=ghcr.io/jvdillon/netv-ffmpeg:cuda12-6 docker compose --profile nvidia up -d` |
   | 570 | 12-8 | `FFMPEG_IMAGE=ghcr.io/jvdillon/netv-ffmpeg:cuda12-8 docker compose --profile nvidia up -d` |
   | 580 | 13-0 | `FFMPEG_IMAGE=ghcr.io/jvdillon/netv-ffmpeg:cuda13-0 docker compose --profile nvidia up -d` |
