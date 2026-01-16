@@ -700,7 +700,7 @@ def probe_media(
         try:
             cmd = base_cmd.copy()
             if force_hls:
-                cmd.extend(["-f", "hls", "-extension_picky", "0"])
+                cmd.extend(["-f", "hls", "-extension_picky", "0", "-hls_prefer_x_stream_inf", "1"])
             cmd.append(url)
             log.info("Probing%s: %s", " (HLS mode)" if force_hls else "", " ".join(cmd))
             result = subprocess.run(
@@ -1225,8 +1225,9 @@ def build_hls_ffmpeg_cmd(
     if user_agent:
         cmd.extend(["-user_agent", user_agent])
     # Use HLS demuxer options if probe detected HLS format
+    # -hls_prefer_x_stream_inf 1 selects highest bandwidth variant from master playlist
     if media_info and media_info.is_hls:
-        cmd.extend(["-f", "hls", "-extension_picky", "0"])
+        cmd.extend(["-f", "hls", "-extension_picky", "0", "-hls_prefer_x_stream_inf", "1"])
     cmd.extend(["-i", input_url])
 
     # Subtitle extraction
