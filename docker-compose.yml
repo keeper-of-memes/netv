@@ -3,53 +3,70 @@
 # Build:
 #   docker compose build                              # Default (optimized FFmpeg)
 #   FFMPEG_IMAGE=ubuntu:24.04 docker compose build    # Alternative (apt FFmpeg)
+#   FFMPEG_IMAGE=ghcr.io/keeper-of-memes/netv-ffmpeg:cuda12.4-nvenc12.2 - custom ffmpeg build for legacy cuda drivers  
+#   CUDA_VERSION=12-4 FFMPEG_BASE_IMAGE=ubuntu:22.04 docker compose build netv-ffmpeg
 #
 # Run:
 #   docker compose up -d                    # Auto-detects hardware (Intel/AMD)
-#   docker compose --profile nvidia up -d   # NVIDIA GPU (driver 580+, Turing+)
-#
-# NVIDIA with older drivers/GPUs (see README for driver/compute compatibility):
-#   FFMPEG_IMAGE=ghcr.io/jvdillon/netv-ffmpeg:cuda12-9 docker compose --profile nvidia up -d
+#   docker compose --profile nvidia up -d   # NVIDIA GPU
 #
 # No GPU or /dev/dri? Comment out the 'devices' section below.
 
 services:
+  netv-ffmpeg:
+    build:
+      context: .
+      dockerfile: Dockerfile.ffmpeg
+      args:
+        CUDA_VERSION: ${CUDA_VERSION:-12-9}
+        ENABLE_TENSORRT: ${ENABLE_TENSORRT:-1}
+        FFMPEG_BASE_IMAGE: ${FFMPEG_BASE_IMAGE:-ubuntu:24.04}
+    image: netv-ffmpeg
+
   netv:
+    runtime: nvidia # add NVIDIA runtime as no /etc/docker/daemon.json setup
     build:
       context: .
       args:
-        FFMPEG_IMAGE: ${FFMPEG_IMAGE:-ghcr.io/jvdillon/netv-ffmpeg:latest}
+         FFMPEG_IMAGE: netv-ffmpeg
+        # FFMPEG_IMAGE: ${FFMPEG_IMAGE:-ghcr.io/jvdillon/netv-ffmpeg:latest}
     image: netv
     container_name: netv
-    ports:
-      - "${NETV_PORT:-8000}:8000"
+    network_mode: host
     environment:
-      - NETV_PORT=8000
+      - NETV_PORT=8080
       - NETV_HTTPS=${NETV_HTTPS:-}
-      - LOG_LEVEL=INFO  # DEBUG for verbose logging
+      - LOG_LEVEL=INFO
+      - NVIDIA_VISIBLE_DEVICES=all # needs definition as no /etc/docker/daemon.json setup
+      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility  # DEBUG for verbose logging
+      - LIBVA_DRIVER_NAME=i965  # add i965 support
+      - LIBVA_DRIVERS_PATH=/usr/lib/x86_64-linux-gnu/dri # add i965 support
     volumes:
-      - ./cache:/app/cache
+      - netv_cache:/app/cache
       - /etc/localtime:/etc/localtime:ro  # Use host timezone for EPG
       # For HTTPS, also mount your certificates:
       # - /etc/letsencrypt:/etc/letsencrypt:ro
       # Use system RAM instead of using local storage to store transcodes
-      # - /dev/shm:/tmp
+      - /dev/shm:/tmp
     restart: unless-stopped
     # Hardware acceleration (Intel/AMD) - comment out if no /dev/dri
     devices:
       - /dev/dri:/dev/dri
 
+volumes:
+  netv_cache:
+
   # NVIDIA GPU: docker compose --profile nvidia up -d
-  netv-nvidia:
-    extends:
-      service: netv
-    container_name: netv
-    profiles:
-      - nvidia
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+  # netv-nvidia:
+  #   extends:
+  #     service: netv
+  #   container_name: netv
+  #   profiles:
+  #     - nvidia
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: all
+  #             capabilities: [gpu]
