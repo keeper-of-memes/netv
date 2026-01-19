@@ -18,7 +18,8 @@
 # =============================================================================
 # Builder stage: compile FFmpeg using install-ffmpeg.sh
 # =============================================================================
-FROM ubuntu:24.04 AS builder
+ARG FFMPEG_BASE_IMAGE=ubuntu:24.04
+FROM ${FFMPEG_BASE_IMAGE} AS builder
 
 # Build configuration - these are passed to install-ffmpeg.sh via environment
 # Hardware acceleration
@@ -30,6 +31,7 @@ ARG LIBTORCH_VERSION=2.5.0
 ARG LIBTORCH_VARIANT=cu124
 # Library builds
 ARG BUILD_LIBPLACEBO=1
+ARG LIBPLACEBO_GIT_REF=
 ARG BUILD_LIBX265=1
 ARG BUILD_LIBAOM=1
 ARG BUILD_LIBWEBP=1
@@ -58,6 +60,7 @@ ENV ENABLE_LIBTORCH=${ENABLE_LIBTORCH}
 ENV LIBTORCH_VERSION=${LIBTORCH_VERSION}
 ENV LIBTORCH_VARIANT=${LIBTORCH_VARIANT}
 ENV BUILD_LIBPLACEBO=${BUILD_LIBPLACEBO}
+ENV LIBPLACEBO_GIT_REF=${LIBPLACEBO_GIT_REF}
 ENV BUILD_LIBX265=${BUILD_LIBX265}
 ENV BUILD_LIBAOM=${BUILD_LIBAOM}
 ENV BUILD_LIBWEBP=${BUILD_LIBWEBP}
@@ -82,7 +85,8 @@ RUN chmod +x /tmp/install-ffmpeg.sh && /tmp/install-ffmpeg.sh
 # =============================================================================
 # Runtime stage: minimal image with just FFmpeg binaries
 # =============================================================================
-FROM ubuntu:24.04
+ARG FFMPEG_BASE_IMAGE=ubuntu:24.04
+FROM ${FFMPEG_BASE_IMAGE}
 
 ARG BUILD_DATE
 ARG FFMPEG_VERSION=snapshot
@@ -112,6 +116,20 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Note: x265, libaom, libwebp, libvpl, libdav1d are statically linked when built from source
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    . /etc/os-release && \
+    if [ "$VERSION_CODENAME" = "jammy" ]; then \
+        LIBVPX=libvpx7; \
+        LIBSRT=libsrt1.4-gnutls; \
+        LIBUNISTRING=libunistring2; \
+        LIBASOUND=libasound2; \
+        LIBSNDIO=libsndio7.0; \
+    else \
+        LIBVPX=libvpx9; \
+        LIBSRT=libsrt1.5-openssl; \
+        LIBUNISTRING=libunistring5; \
+        LIBASOUND=libasound2t64; \
+        LIBSNDIO=libsndio7.0; \
+    fi && \
     apt-get update && apt-get install -y --no-install-recommends \
     # Core codec libs
     libass9 \
@@ -121,7 +139,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libopus0 \
     libvorbis0a \
     libvorbisenc2 \
-    libvpx9 \
+    $LIBVPX \
     # Text/font rendering
     libfontconfig1 \
     libfreetype6 \
@@ -134,7 +152,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libzimg2 \
     libnuma1 \
     # Network/crypto
-    libsrt1.5-openssl \
+    $LIBSRT \
     libssl3 \
     # X11/display
     libxcb1 \
@@ -155,18 +173,21 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     ocl-icd-libopencl1 \
     # Other deps
     zlib1g \
-    libunistring5 \
+    $LIBUNISTRING \
     liblzma5 \
     liblzo2-2 \
-    libasound2t64 \
+    $LIBASOUND \
     libdrm2 \
-    libsndio7.0 \
+    $LIBSNDIO \
     libsdl2-2.0-0 \
     libpulse0
 
 # Conditional runtime libs for apt-based packages (when not built from source)
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    . /etc/os-release && \
+    HWY_PKG="libhwy1t64" && \
+    if [ "$VERSION_CODENAME" = "jammy" ]; then HWY_PKG="libhwy0"; fi && \
     APT_PKGS="" && \
     [ "$BUILD_LIBX265" != "1" ] && APT_PKGS="$APT_PKGS libx265-199" ; \
     [ "$BUILD_LIBAOM" != "1" ] && APT_PKGS="$APT_PKGS libaom3" ; \
@@ -177,7 +198,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     [ "$BUILD_LIBVMAF" != "1" ] && APT_PKGS="$APT_PKGS libvmaf3" ; \
     [ "$BUILD_LIBPLACEBO" = "1" ] && APT_PKGS="$APT_PKGS libvulkan1" ; \
     [ "$BUILD_LIBVA" != "1" ] && APT_PKGS="$APT_PKGS libva2 libva-drm2 libva-x11-2" ; \
-    [ "$BUILD_LIBJXL" = "1" ] && APT_PKGS="$APT_PKGS libbrotli1 libhwy1t64" ; \
+    [ "$BUILD_LIBJXL" = "1" ] && APT_PKGS="$APT_PKGS libbrotli1 $HWY_PKG" ; \
     [ "$BUILD_LIBJXL" != "1" ] && APT_PKGS="$APT_PKGS libjxl0.7" ; \
     [ "$BUILD_LIBX264" != "1" ] && APT_PKGS="$APT_PKGS libx264-164" ; \
     if [ -n "$APT_PKGS" ]; then apt-get update && apt-get install -y --no-install-recommends $APT_PKGS; fi

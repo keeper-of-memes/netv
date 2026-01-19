@@ -4,6 +4,10 @@
 # https://trac.ffmpeg.org/wiki/CompilationGuide/Ubuntu
 set -e
 
+# Ensure noninteractive installs in containers.
+export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
+export TZ="${TZ:-Etc/UTC}"
+
 # Capture script directory before any cd commands
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -169,12 +173,44 @@ BUILD_LIBVMAF=${BUILD_LIBVMAF:-1}        # Video quality metrics (apt: 2.3.1, la
 BUILD_LIBVA=${BUILD_LIBVA:-1}            # VA-API (apt: 2.20.0, latest: 2.23.0 - Xe support)
 BUILD_LIBJXL=${BUILD_LIBJXL:-1}          # JPEG XL (apt: 0.7.0, latest: 0.11.1)
 BUILD_LIBX264=${BUILD_LIBX264:-1}        # H.264 encoder (apt: 8-bit only, src: 8/10-bit)
+SVTAV1_GIT_REF=${SVTAV1_GIT_REF:-}
 
 # FFmpeg version: "snapshot" for latest git, or specific version like "7.1"
 FFMPEG_VERSION=${FFMPEG_VERSION:-snapshot}
 
+# Pin FFmpeg to 7.x on Ubuntu 22.04 (jammy) unless explicitly overridden.
+if [ "$FFMPEG_VERSION" = "snapshot" ] && [ -f /etc/os-release ]; then
+    . /etc/os-release
+    if [ "$VERSION_CODENAME" = "jammy" ]; then
+        FFMPEG_VERSION="7.0"
+    fi
+fi
+
 # Skip apt dependency installation (use if deps already installed, avoids sudo)
 SKIP_DEPS=${SKIP_DEPS:-0}
+PHASE=${PHASE:-all}
+
+version_ge() {
+    [ "$(printf '%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]
+}
+
+ensure_meson_min_version() {
+    local min_version="$1"
+    local current_version
+
+    current_version=$(meson --version 2>/dev/null || echo 0)
+    if ! version_ge "$current_version" "$min_version"; then
+        echo "Meson $current_version < $min_version, upgrading via pip..."
+        sudo apt-get update
+        sudo apt-get install -y python3-pip
+        if pip3 install --help 2>/dev/null | grep -q -- '--break-system-packages'; then
+            sudo -E pip3 install --upgrade --break-system-packages meson
+        else
+            sudo -E pip3 install --upgrade meson
+        fi
+        export PATH="/usr/local/bin:$PATH"
+    fi
+}
 
 # NVIDIA CUDA setup (only used if ENABLE_NVIDIA_CUDA=1)
 # CUDA_VERSION options:
@@ -196,6 +232,22 @@ LIB_DIR="${LIB_DIR:-$HOME/.local/lib}"          # Final shared library install l
 NPROC=$(nproc)
 
 mkdir -p "$SRC_DIR" "$BUILD_DIR" "$BIN_DIR" "$LIB_DIR"
+
+# Default libplacebo ref for older distros (jammy tends to lack newer deps).
+if [ -z "$LIBPLACEBO_GIT_REF" ] && [ -f /etc/os-release ]; then
+    . /etc/os-release
+    if [ "$VERSION_CODENAME" = "jammy" ]; then
+        LIBPLACEBO_GIT_REF="v7.349.0"
+    fi
+fi
+
+# Default SVT-AV1 ref for jammy when building FFmpeg 7.x.
+if [ -z "$SVTAV1_GIT_REF" ] && [ -f /etc/os-release ]; then
+    . /etc/os-release
+    if [ "$VERSION_CODENAME" = "jammy" ] && [ "$FFMPEG_VERSION" = "7.0" ]; then
+        SVTAV1_GIT_REF="v2.1.2"
+    fi
+fi
 
 # Base packages (installed first, includes wget needed for CUDA repo setup)
 APT_PACKAGES=(
@@ -260,7 +312,12 @@ APT_PACKAGES=(
 [ "$BUILD_LIBX264" != "1" ] && APT_PACKAGES+=(libx264-dev)
 # Note: TensorRT packages (libnvinfer-dev) installed later after CUDA repo is set up
 if [ "$SKIP_DEPS" != "1" ]; then
+    if [ -n "$TZ" ]; then
+        ln -fs "/usr/share/zoneinfo/$TZ" /etc/localtime
+        echo "$TZ" > /etc/timezone
+    fi
     sudo apt-get update && sudo apt-get install -y "${APT_PACKAGES[@]}"
+    ensure_meson_min_version 0.63
 fi
 
 
@@ -421,6 +478,11 @@ if [ "$ENABLE_AMD_AMF" = "1" ]; then
     cp -r AMF/amf/public/include/* "$BUILD_DIR/include/AMF/"
     AMF_FLAGS=(--enable-amf)
     echo "AMF headers installed for AMD GPU encoding"
+fi
+
+if [ "$PHASE" = "deps" ]; then
+    echo "PHASE=deps set; skipping source builds."
+    exit 0
 fi
 
 
@@ -584,6 +646,10 @@ if [ "$BUILD_LIBSVTAV1" = "1" ]; then
     ([ -d SVT-AV1/.git ] && git -C SVT-AV1 pull || (rm -rf SVT-AV1 && git clone --depth 1 https://gitlab.com/AOMediaCodec/SVT-AV1.git)) &&
     mkdir -p SVT-AV1/build &&
     cd SVT-AV1/build &&
+    if [ -n "$SVTAV1_GIT_REF" ]; then
+        git -C .. fetch --depth 1 origin "$SVTAV1_GIT_REF" &&
+        git -C .. checkout -q FETCH_HEAD
+    fi &&
     PATH="$BIN_DIR:$PATH" cmake -G "Unix Makefiles" -DCMAKE_INSTALL_PREFIX="$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release -DBUILD_DEC=OFF -DBUILD_SHARED_LIBS=OFF .. &&
     PATH="$BIN_DIR:$PATH" make -j $NPROC &&
     make install
@@ -622,6 +688,34 @@ if [ "$BUILD_LIBVA" = "1" ]; then
     cp -a "$BUILD_DIR/lib"/libva*.so* "$LIB_DIR/"
 fi
 
+meson_supports_prefer_static() {
+    meson setup --help 2>/dev/null | grep -q -- '--prefer-static'
+}
+
+build_libplacebo() {
+    local meson_args=(
+        --buildtype=release
+        --default-library=static
+        -Dvulkan=enabled
+        -Dvulkan-registry="$VULKAN_SDK/share/vulkan/registry/vk.xml"
+        -Dopengl=disabled
+        -Dd3d11=disabled
+        -Ddemos=false
+        --prefix "$BUILD_DIR"
+        --libdir "$BUILD_DIR/lib"
+    )
+
+    if meson_supports_prefer_static; then
+        meson_args+=(--prefer-static)
+    fi
+
+    if [ -f build/build.ninja ]; then
+        meson setup --reconfigure "${meson_args[@]}" build
+    else
+        meson setup "${meson_args[@]}" build
+    fi
+}
+
 # libplacebo (for GPU tone mapping)
 if [ "$BUILD_LIBPLACEBO" = "1" ]; then
     # Download Vulkan SDK tarball (apt packages deprecated May 2025)
@@ -650,11 +744,11 @@ if [ "$BUILD_LIBPLACEBO" = "1" ]; then
     cd "$SRC_DIR" &&
     ([ -d libplacebo/.git ] && git -C libplacebo pull || (rm -rf libplacebo && git clone --depth 1 https://code.videolan.org/videolan/libplacebo.git)) &&
     cd libplacebo &&
-    if [ -f build/build.ninja ]; then
-        meson setup --reconfigure build --buildtype=release --default-library=static --prefer-static -Dvulkan=enabled -Dvulkan-registry="$VULKAN_SDK/share/vulkan/registry/vk.xml" -Dopengl=disabled -Dd3d11=disabled -Ddemos=false --prefix "$BUILD_DIR" --libdir="$BUILD_DIR/lib"
-    else
-        meson setup build --buildtype=release --default-library=static --prefer-static -Dvulkan=enabled -Dvulkan-registry="$VULKAN_SDK/share/vulkan/registry/vk.xml" -Dopengl=disabled -Dd3d11=disabled -Ddemos=false --prefix "$BUILD_DIR" --libdir="$BUILD_DIR/lib"
+    if [ -n "$LIBPLACEBO_GIT_REF" ]; then
+        git fetch --depth 1 origin "$LIBPLACEBO_GIT_REF" &&
+        git checkout -q FETCH_HEAD
     fi &&
+    build_libplacebo &&
     ninja -C build &&
     ninja -C build install
 fi
@@ -847,6 +941,13 @@ if [ "$ENABLE_LIBTORCH" = "1" ]; then
 
         echo "Torch TensorRT patch applied"
     fi
+fi
+
+# Patch ffmpeg's libplacebo filter to include libavformat version header
+# (suppresses LIBAVFORMAT_VERSION_INT -Wundef warnings).
+LIBPLACEBO_FILTER="$FFMPEG_DIR/libavfilter/vf_libplacebo.c"
+if [ -f "$LIBPLACEBO_FILTER" ] && ! grep -q "libavformat/version.h" "$LIBPLACEBO_FILTER"; then
+    sed -i '/#include "libavfilter\/avfilter.h"/a #include "libavformat/version.h"' "$LIBPLACEBO_FILTER"
 fi
 
 # TensorRT native backend (no libtorch dependency)
