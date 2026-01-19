@@ -460,8 +460,22 @@ extern __DEVICE_FUNCTIONS_DECL__ __device_builtin__ float                  rsqrt
         echo "CUDA $CUDA_VERSION NVCC_GENCODE=$NVCC_GENCODE -> $NVCC_ARCH"
     fi
 
+    # Pin nv-codec-headers for specific builds:
+    # - netv-ffmpeg:cuda12.4 OR CUDA_VERSION=12-4 -> use NVENC API 12.2 headers (sdk/12.2)
+    # - otherwise                                -> use upstream master
+    NV_CODEC_REF="master"
+    if [ "${FFMPEG_IMAGE:-}" = "netv-ffmpeg:cuda12.4" ] || [ "${CUDA_VERSION:-}" = "12-4" ]; then
+        NV_CODEC_REF="sdk/12.2"
+    fi
+    echo "nv-codec-headers: FFMPEG_IMAGE=${FFMPEG_IMAGE:-unset}, CUDA_VERSION=${CUDA_VERSION:-unset}, ref=$NV_CODEC_REF"
+
     cd "$SRC_DIR" &&
-    ([ -d nv-codec-headers/.git ] && git -C nv-codec-headers pull || (rm -rf nv-codec-headers && git clone --depth 1 https://git.videolan.org/git/ffmpeg/nv-codec-headers.git)) &&
+    if [ -d nv-codec-headers/.git ]; then
+        git -C nv-codec-headers fetch --depth 1 origin "$NV_CODEC_REF" &&
+        git -C nv-codec-headers checkout -f "$NV_CODEC_REF"
+    else
+        git clone --depth 1 --branch "$NV_CODEC_REF" https://git.videolan.org/git/ffmpeg/nv-codec-headers.git
+    fi &&
     cd nv-codec-headers &&
     make &&
     make PREFIX="$BUILD_DIR" install
