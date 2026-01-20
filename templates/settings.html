@@ -934,24 +934,24 @@
 {% block scripts %}
 <script>
 window.SETTINGS_CONFIG = {
-  currentUser: {{ current_user | tojson }},
-  selectedCats: {{ selected_cats | tojson }},
-  selectedVodCats: {{ selected_vod_cats | tojson }},
-  selectedSeriesCats: {{ selected_series_cats | tojson }},
+  currentUser: {{ current_user | tojson | safe }},
+  selectedCats: {{ selected_cats | tojson | safe }},
+  selectedVodCats: {{ selected_vod_cats | tojson | safe }},
+  selectedSeriesCats: {{ selected_series_cats | tojson | safe }},
   catNames: {
-    {% for cat in live_categories %}{{ cat.category_id | tojson }}: {{ cat.category_name | tojson }}{% if not loop.last %},{% endif %}
+    {% for cat in live_categories %}{{ cat.category_id | tojson | safe }}: {{ cat.category_name | tojson | safe }}{% if not loop.last %},{% endif %}
     {% endfor %}
   },
   vodCatNames: {
-    {% for cat in vod_categories %}{{ cat.category_id | tojson }}: {{ cat.category_name | tojson }}{% if not loop.last %},{% endif %}
+    {% for cat in vod_categories %}{{ cat.category_id | tojson | safe }}: {{ cat.category_name | tojson | safe }}{% if not loop.last %},{% endif %}
     {% endfor %}
   },
   seriesCatNames: {
-    {% for cat in series_categories %}{{ cat.category_id | tojson }}: {{ cat.category_name | tojson }}{% if not loop.last %},{% endif %}
+    {% for cat in series_categories %}{{ cat.category_id | tojson | safe }}: {{ cat.category_name | tojson | safe }}{% if not loop.last %},{% endif %}
     {% endfor %}
   },
-  ccStyle: {{ cc_style | tojson }},
-  ccLang: {{ cc_lang | tojson }}
+  ccStyle: {{ cc_style | tojson | safe }},
+  ccLang: {{ cc_lang | tojson | safe }}
 };
 </script>
 <script src="/static/js/settings.js"></script>

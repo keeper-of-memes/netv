@@ -109,6 +109,9 @@ _login_attempts: dict[str, list[float]] = {}
 _LOGIN_WINDOW = 300  # 5 minutes
 _LOGIN_MAX_ATTEMPTS = 10
 
+# Category filter limits
+_MAX_FILTER_CATEGORIES = 10000
+
 
 # =============================================================================
 # App Setup
@@ -2150,7 +2153,7 @@ async def settings_guide_filter(
     username = user.get("sub", "")
     data = await request.json()
     cats = data.get("cats", [])
-    if not isinstance(cats, list) or len(cats) > 500:
+    if not isinstance(cats, list) or len(cats) > _MAX_FILTER_CATEGORIES:
         raise HTTPException(400, "Invalid filter list")
     user_settings = load_user_settings(username)
     user_settings["guide_filter"] = cats
@@ -2166,7 +2169,7 @@ async def settings_vod_filter(
     username = user.get("sub", "")
     data = await request.json()
     cats = data.get("cats", [])
-    if not isinstance(cats, list) or len(cats) > 500:
+    if not isinstance(cats, list) or len(cats) > _MAX_FILTER_CATEGORIES:
         raise HTTPException(400, "Invalid filter list")
     user_settings = load_user_settings(username)
     user_settings["vod_filter"] = cats
@@ -2182,7 +2185,7 @@ async def settings_series_filter(
     username = user.get("sub", "")
     data = await request.json()
     cats = data.get("cats", [])
-    if not isinstance(cats, list) or len(cats) > 500:
+    if not isinstance(cats, list) or len(cats) > _MAX_FILTER_CATEGORIES:
         raise HTTPException(400, "Invalid filter list")
     user_settings = load_user_settings(username)
     user_settings["series_filter"] = cats
