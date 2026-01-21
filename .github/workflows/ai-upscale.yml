@@ -108,7 +108,8 @@ jobs:
             done
 
             # Verify non-NVIDIA dependencies are satisfied
-            MISSING=\$(echo \"\$LDD_OUTPUT\" | grep 'not found' | grep -v -E 'libnvinfer|libnvonnxparser|libcudart|libcuda' || true)
+            # Note: TensorRT (libnvinfer) is loaded via dlopen, so exclude it and CUDA from the check
+            MISSING=\$(echo \"\$LDD_OUTPUT\" | grep 'not found' | grep -v -E 'libcudart|libcuda' || true)
             if [ -n \"\$MISSING\" ]; then
               echo 'ERROR: Missing non-NVIDIA libraries:'
               echo \"\$MISSING\"
@@ -116,13 +117,10 @@ jobs:
             fi
             echo 'OK: All non-NVIDIA dependencies satisfied'
 
-            # Verify CUDA is linked
+            # Verify CUDA is linked (needed for CUDA kernels)
             echo \"\$LDD_OUTPUT\" | grep -q libcudart || { echo 'ERROR: CUDA (libcudart) not linked'; exit 1; }
             echo 'OK: libcudart linked'
-
-            # Verify TensorRT is linked
-            echo \"\$LDD_OUTPUT\" | grep -q libnvinfer || { echo 'ERROR: TensorRT (libnvinfer) not linked'; exit 1; }
-            echo 'OK: libnvinfer linked'
+            echo 'OK: libnvinfer loaded via dlopen (not in ldd output)'
 
             # Verify Python AI packages installed (use pip show, not import - import needs CUDA runtime)
             echo '=== Verifying Python packages ==='

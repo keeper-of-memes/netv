@@ -26,16 +26,84 @@
  * high-performance GPU inference. Use tools/export-tensorrt.py to convert
  * PyTorch models to TensorRT engines.
  *
+ * Libraries are loaded at runtime via dlopen, so ffmpeg works even without
+ * TensorRT/CUDA installed. Errors only occur when the TRT backend is actually used.
+ *
  * Usage:
  *   ffmpeg -i input.mp4 -vf "dnn_processing=dnn_backend=tensorrt:model=model.engine" output.mp4
  */
 
 #include <NvInfer.h>
 #include <cuda_runtime.h>
+#include <dlfcn.h>
 #include <fstream>
 #include <vector>
 #include <memory>
 #include <cstring>
+
+// ============================================================================
+// Dynamic library loading - allows ffmpeg to run without TensorRT installed
+// ============================================================================
+//
+// TensorRT (libnvinfer) is loaded at runtime via dlopen. This means:
+// - ffmpeg binary starts even without TensorRT installed
+// - Clear error only when TensorRT backend is actually used
+// - Users without GPU can use all other ffmpeg features
+//
+// CUDA runtime (libcudart) is still linked at compile time because the CUDA
+// kernels for input/output conversion require it. However, if CUDA isn't
+// installed, ffmpeg will fail at startup (not ideal, but CUDA kernels can't
+// easily be dlopen'd due to the <<<>>> launch syntax).
+
+static void *libnvinfer_handle = NULL;
+static int tensorrt_loaded = 0;
+static int tensorrt_load_attempted = 0;
+
+// TensorRT factory function pointer (the only dlsym we need - methods use vtables)
+typedef nvinfer1::IRuntime* (*fn_createInferRuntime)(nvinfer1::ILogger&);
+static fn_createInferRuntime p_createInferRuntime = NULL;
+
+static int load_tensorrt_lib(void *log_ctx) {
+    if (tensorrt_load_attempted)
+        return tensorrt_loaded ? 0 : AVERROR(ENOSYS);
+    tensorrt_load_attempted = 1;
+
+    // Try loading TensorRT - try versioned names first, then unversioned
+    const char *nvinfer_names[] = {
+        "libnvinfer.so.10", "libnvinfer.so.9", "libnvinfer.so.8", "libnvinfer.so", NULL
+    };
+    for (int i = 0; nvinfer_names[i] && !libnvinfer_handle; i++) {
+        libnvinfer_handle = dlopen(nvinfer_names[i], RTLD_NOW);
+    }
+    if (!libnvinfer_handle) {
+        av_log(log_ctx, AV_LOG_ERROR,
+               "TensorRT not available: %s\n"
+               "Install TensorRT or run with --gpus all to use nvidia-container-toolkit\n",
+               dlerror());
+        return AVERROR(ENOSYS);
+    }
+
+    // Get TensorRT factory function - try multiple mangled names for compatibility
+    // The mangling varies by compiler/platform
+    const char *create_runtime_names[] = {
+        "_ZN8nvinfer118createInferRuntimeERNS_7ILoggerE",  // GCC mangling
+        "createInferRuntime",  // Some builds export unmangled
+        NULL
+    };
+    for (int i = 0; create_runtime_names[i] && !p_createInferRuntime; i++) {
+        p_createInferRuntime = (fn_createInferRuntime)dlsym(libnvinfer_handle, create_runtime_names[i]);
+    }
+    if (!p_createInferRuntime) {
+        av_log(log_ctx, AV_LOG_ERROR, "Failed to find createInferRuntime in TensorRT library\n");
+        dlclose(libnvinfer_handle);
+        libnvinfer_handle = NULL;
+        return AVERROR(ENOSYS);
+    }
+
+    tensorrt_loaded = 1;
+    av_log(log_ctx, AV_LOG_INFO, "TensorRT library loaded via dlopen\n");
+    return 0;
+}
 
 extern "C" {
 #include "dnn_io_proc.h"
@@ -661,11 +729,16 @@ static DNNModel *dnn_load_model_trt(DnnContext *ctx, DNNFunctionType func_type, 
 
     trt_model->ctx = ctx;
 
+    // Load TensorRT library via dlopen (allows ffmpeg to work without TensorRT installed)
+    if (load_tensorrt_lib(ctx) < 0) {
+        goto fail;
+    }
+
     // Create TensorRT logger
     trt_model->logger = new TRTLogger(ctx);
 
-    // Create runtime
-    trt_model->runtime = nvinfer1::createInferRuntime(*trt_model->logger);
+    // Create runtime using dynamically loaded function
+    trt_model->runtime = p_createInferRuntime(*trt_model->logger);
     if (!trt_model->runtime) {
         av_log(ctx, AV_LOG_ERROR, "Failed to create TensorRT runtime\n");
         goto fail;

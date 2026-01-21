@@ -1052,13 +1052,14 @@ typedef struct TRTOptions {\
         sed -i '/^    libtorch$/a\    libtensorrt' "$CONFIGURE"
         # Add to dnn_deps_any
         sed -i 's/dnn_deps_any="libtensorflow libopenvino libtorch"/dnn_deps_any="libtensorflow libopenvino libtorch libtensorrt"/' "$CONFIGURE"
-        # Add library check (after libtorch check)
-        # Use nvinfer1::Dims which is a simple struct that can be default-constructed
+        # Add header check (after libtorch check)
+        # TensorRT (libnvinfer) is loaded via dlopen at runtime - don't link against it
+        # CUDA (libcudart) is still linked because the CUDA kernels require it
+        # Link against -ldl for dlopen/dlsym
         sed -i '/enabled libtorch.*require_cxx libtorch/a\
-enabled libtensorrt       \&\& check_cxxflags -std=c++17 \&\& require_cxx libtensorrt NvInfer.h "nvinfer1::Dims" \\\
-                             -lnvinfer -lcudart -lstdc++ \&\&\
-                             add_extralibs -lnvinfer_plugin' "$CONFIGURE"
-        echo "Patched configure"
+enabled libtensorrt       \&\& check_cxxflags -std=c++17 \&\& check_header NvInfer.h \&\& check_header cuda_runtime.h \&\&\
+                             add_extralibs -lcudart -ldl -lstdc++' "$CONFIGURE"
+        echo "Patched configure (TensorRT via dlopen, CUDA linked for kernels)"
     fi
 
     TENSORRT_FLAGS=(--enable-libtensorrt)
