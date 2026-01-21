@@ -129,12 +129,14 @@ jobs:
             fi
             echo 'OK: All non-NVIDIA shared dependencies satisfied'
 
-            # Verify NVIDIA shared libs are linked (show 'not found' but must appear in ldd)
-            # Note: TensorRT (libnvinfer) is loaded via dlopen at runtime, so it won't appear in ldd
+            # Verify NVIDIA libraries
+            # - CUDA (libcudart): linked at compile time for CUDA kernels
+            # - TensorRT (libnvinfer): loaded via dlopen, but installed in image for convenience
             echo '=== Verifying NVIDIA libraries ==='
             echo \"\$LDD_OUTPUT\" | grep -q libcudart || { echo 'ERROR: CUDA (libcudart) not linked'; exit 1; }
             echo 'OK: libcudart linked'
-            echo 'OK: libnvinfer loaded via dlopen (not in ldd output)'
+            ls /usr/lib/x86_64-linux-gnu/libnvinfer.so* >/dev/null 2>&1 || { echo 'ERROR: TensorRT (libnvinfer) not installed'; exit 1; }
+            echo 'OK: libnvinfer installed (loaded via dlopen)'
 
             # Verify libva is linked (we build it as shared for runtime)
             echo \"\$LDD_OUTPUT\" | grep -q libva || { echo 'ERROR: libva not linked'; exit 1; }

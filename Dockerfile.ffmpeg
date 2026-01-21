@@ -141,6 +141,23 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         apt-get update; \
     fi
 
+# Add NVIDIA repo and install TensorRT runtime (for TensorRT DNN backend)
+# Note: TensorRT is loaded via dlopen, so ffmpeg works even if these aren't installed,
+# but including them means the Docker image works out of the box with --gpus all
+ARG ENABLE_TENSORRT=1
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    if [ "$ENABLE_TENSORRT" = "1" ]; then \
+        . /etc/os-release && \
+        apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && \
+        curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu${VERSION_ID/./}/x86_64/cuda-keyring_1.1-1_all.deb \
+            -o /tmp/cuda-keyring.deb && \
+        dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb && \
+        apt-get update && \
+        apt-get install -y --no-install-recommends libnvinfer10 libnvinfer-plugin10 && \
+        rm -rf /var/lib/apt/lists/*; \
+    fi
+
 # Runtime libraries for FFmpeg
 # Note: x265, libaom, libwebp, libvpl, libdav1d are statically linked when built from source
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \

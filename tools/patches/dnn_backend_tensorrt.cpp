@@ -63,6 +63,26 @@ static int tensorrt_load_attempted = 0;
 typedef nvinfer1::IRuntime* (*fn_createInferRuntime)(nvinfer1::ILogger&);
 static fn_createInferRuntime p_createInferRuntime = NULL;
 
+// Forward declaration - implemented after FFmpeg headers are included
+static int load_tensorrt_lib(void *log_ctx);
+
+extern "C" {
+#include "dnn_io_proc.h"
+#include "dnn_backend_common.h"
+#include "libavutil/opt.h"
+#include "libavutil/mem.h"
+#include "libavutil/avassert.h"
+#include "libavutil/internal.h"
+#include "libavutil/hwcontext.h"
+#include "libavutil/hwcontext_cuda.h"
+#include "libavutil/pixfmt.h"
+#include "libavutil/pixdesc.h"
+#include "queue.h"
+#include "safe_queue.h"
+#include "dnn_cuda_kernels.h"
+}
+
+// Implementation of load_tensorrt_lib (after FFmpeg headers so AVERROR/av_log are defined)
 static int load_tensorrt_lib(void *log_ctx) {
     if (tensorrt_load_attempted)
         return tensorrt_loaded ? 0 : AVERROR(ENOSYS);
@@ -103,22 +123,6 @@ static int load_tensorrt_lib(void *log_ctx) {
     tensorrt_loaded = 1;
     av_log(log_ctx, AV_LOG_INFO, "TensorRT library loaded via dlopen\n");
     return 0;
-}
-
-extern "C" {
-#include "dnn_io_proc.h"
-#include "dnn_backend_common.h"
-#include "libavutil/opt.h"
-#include "libavutil/mem.h"
-#include "libavutil/avassert.h"
-#include "libavutil/internal.h"
-#include "libavutil/hwcontext.h"
-#include "libavutil/hwcontext_cuda.h"
-#include "libavutil/pixfmt.h"
-#include "libavutil/pixdesc.h"
-#include "queue.h"
-#include "safe_queue.h"
-#include "dnn_cuda_kernels.h"
 }
 
 // TensorRT logger - forward to FFmpeg's logging
