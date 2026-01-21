@@ -154,7 +154,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
             -o /tmp/cuda-keyring.deb && \
         dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb && \
         apt-get update && \
-        apt-get install -y --no-install-recommends libnvinfer10 libnvinfer-plugin10 && \
+        if [ "$VERSION_CODENAME" = "jammy" ]; then \
+            apt-get install -y --no-install-recommends libnvinfer8 libnvinfer-plugin8; \
+        else \
+            apt-get install -y --no-install-recommends libnvinfer10 libnvinfer-plugin10; \
+        fi && \
         rm -rf /var/lib/apt/lists/*; \
     fi
 
