@@ -26,7 +26,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-venv \
     python3-pip \
     $(if [ ! -f /usr/local/bin/ffmpeg ]; then echo "ffmpeg"; fi) \
-    && python3 -m pip install --no-cache-dir --break-system-packages --upgrade pip \
     && rm -rf /var/lib/apt/lists/*
 
 # App setup
