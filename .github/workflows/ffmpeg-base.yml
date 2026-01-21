@@ -105,10 +105,11 @@ jobs:
       - name: Verify image
         run: |
           docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:cuda${{ steps.cuda.outputs.version }}
-          # Verify everything that should be enabled is actually linked
+          # Verify ffmpeg build - check binaries and shared library dependencies
+          # Note: Static libraries (libx264, libx265, etc.) are compiled into the binary
+          # and won't appear in ldd output. If they were missing, the build would have failed.
           docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:cuda${{ steps.cuda.outputs.version }} sh -c "
             echo '=== Verifying ffmpeg build ==='
-            LDD_OUTPUT=\$(ldd /usr/local/bin/ffmpeg)
 
             # Verify all binaries exist
             for bin in ffmpeg ffprobe ffplay; do
@@ -116,65 +117,33 @@ jobs:
               echo \"OK: \$bin exists\"
             done
 
-            # Verify non-NVIDIA dependencies are satisfied (not missing)
+            # Get ldd output for shared library checks
+            LDD_OUTPUT=\$(ldd /usr/local/bin/ffmpeg)
+
+            # Verify non-NVIDIA shared dependencies are satisfied
             MISSING=\$(echo \"\$LDD_OUTPUT\" | grep 'not found' | grep -v -E 'libnvinfer|libnvonnxparser|libcudart|libcuda' || true)
             if [ -n \"\$MISSING\" ]; then
               echo 'ERROR: Missing non-NVIDIA libraries:'
               echo \"\$MISSING\"
               exit 1
             fi
-            echo 'OK: All non-NVIDIA dependencies satisfied'
+            echo 'OK: All non-NVIDIA shared dependencies satisfied'
 
-            # Verify expected libraries are linked (will show as 'not found' for NVIDIA libs, but must appear in ldd output)
-            echo '=== Verifying linked libraries ==='
-
-            # ENABLE_NVIDIA_CUDA=1
+            # Verify NVIDIA shared libs are linked (show 'not found' but must appear in ldd)
+            echo '=== Verifying NVIDIA libraries ==='
             echo \"\$LDD_OUTPUT\" | grep -q libcudart || { echo 'ERROR: CUDA (libcudart) not linked'; exit 1; }
             echo 'OK: libcudart linked'
 
-            # ENABLE_TENSORRT=1 (except 12.4)
             if [ '${{ steps.cuda.outputs.version }}' != '12.4' ]; then
               echo \"\$LDD_OUTPUT\" | grep -q libnvinfer || { echo 'ERROR: TensorRT (libnvinfer) not linked'; exit 1; }
               echo 'OK: libnvinfer linked'
             else
-              echo 'SKIP: TensorRT (disabled for CUDA 12.4)'
+              echo 'SKIP: TensorRT check (CUDA 12.4)'
             fi
 
-            # BUILD_LIBX264=1
-            echo \"\$LDD_OUTPUT\" | grep -q libx264 || { echo 'ERROR: libx264 not linked'; exit 1; }
-            echo 'OK: libx264 linked'
-
-            # BUILD_LIBX265=1
-            echo \"\$LDD_OUTPUT\" | grep -q libx265 || { echo 'ERROR: libx265 not linked'; exit 1; }
-            echo 'OK: libx265 linked'
-
-            # BUILD_LIBSVTAV1=1
-            echo \"\$LDD_OUTPUT\" | grep -q SvtAv1 || { echo 'ERROR: libsvtav1 not linked'; exit 1; }
-            echo 'OK: libsvtav1 linked'
-
-            # BUILD_LIBAOM=1
-            echo \"\$LDD_OUTPUT\" | grep -q libaom || { echo 'ERROR: libaom not linked'; exit 1; }
-            echo 'OK: libaom linked'
-
-            # BUILD_LIBDAV1D=1
-            echo \"\$LDD_OUTPUT\" | grep -q libdav1d || { echo 'ERROR: libdav1d not linked'; exit 1; }
-            echo 'OK: libdav1d linked'
-
-            # BUILD_LIBVMAF=1
-            echo \"\$LDD_OUTPUT\" | grep -q libvmaf || { echo 'ERROR: libvmaf not linked'; exit 1; }
-            echo 'OK: libvmaf linked'
-
-            # BUILD_LIBPLACEBO=1
-            echo \"\$LDD_OUTPUT\" | grep -q libplacebo || { echo 'ERROR: libplacebo not linked'; exit 1; }
-            echo 'OK: libplacebo linked'
-
-            # BUILD_LIBVA=1
+            # Verify libva is linked (we build it as shared for runtime)
             echo \"\$LDD_OUTPUT\" | grep -q libva || { echo 'ERROR: libva not linked'; exit 1; }
             echo 'OK: libva linked'
-
-            # BUILD_LIBVPL=1 (Intel QuickSync)
-            echo \"\$LDD_OUTPUT\" | grep -q libvpl || { echo 'ERROR: libvpl not linked'; exit 1; }
-            echo 'OK: libvpl linked'
 
             echo ''
             echo '=== All verifications passed ==='
