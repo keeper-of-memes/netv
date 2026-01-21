@@ -134,12 +134,8 @@ jobs:
             echo \"\$LDD_OUTPUT\" | grep -q libcudart || { echo 'ERROR: CUDA (libcudart) not linked'; exit 1; }
             echo 'OK: libcudart linked'
 
-            if [ '${{ steps.cuda.outputs.version }}' != '12.4' ]; then
-              echo \"\$LDD_OUTPUT\" | grep -q libnvinfer || { echo 'ERROR: TensorRT (libnvinfer) not linked'; exit 1; }
-              echo 'OK: libnvinfer linked'
-            else
-              echo 'SKIP: TensorRT check (CUDA 12.4)'
-            fi
+            echo \"\$LDD_OUTPUT\" | grep -q libnvinfer || { echo 'ERROR: TensorRT (libnvinfer) not linked'; exit 1; }
+            echo 'OK: libnvinfer linked'
 
             # Verify libva is linked (we build it as shared for runtime)
             echo \"\$LDD_OUTPUT\" | grep -q libva || { echo 'ERROR: libva not linked'; exit 1; }

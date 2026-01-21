@@ -178,10 +178,6 @@ SVTAV1_GIT_REF=${SVTAV1_GIT_REF:-}
 # FFmpeg version: "snapshot" for latest git, or specific version like "7.1"
 FFMPEG_VERSION=${FFMPEG_VERSION:-snapshot}
 
-# Note: Ubuntu 22.04 (jammy) used to pin FFmpeg 7.0 due to compatibility concerns,
-# but we now build all dependencies from source, so snapshot should work fine.
-# Keep libplacebo pinned for jammy (newer versions need deps jammy lacks).
-
 # Skip apt dependency installation (use if deps already installed, avoids sudo)
 SKIP_DEPS=${SKIP_DEPS:-0}
 PHASE=${PHASE:-all}
