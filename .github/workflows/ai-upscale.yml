@@ -2,15 +2,10 @@ name: AI Upscale Image
 
 on:
   workflow_dispatch:  # Manual trigger
-  push:
-    branches: [main]
-    paths:
-      - "Dockerfile.ai_upscale"
-      - "entrypoint-ai_upscale.sh"
-      - "tools/install-ai_upscale.sh"
-      - ".github/workflows/ai-upscale.yml"
   workflow_run:
     # Trigger after ffmpeg-base completes to pick up new ffmpeg image
+    # Note: No push trigger - use workflow_dispatch if you need to rebuild
+    # without waiting for ffmpeg-base (requires base images to already exist)
     workflows: ["FFmpeg Base Image"]
     types: [completed]
     branches: [main]
