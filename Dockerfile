@@ -22,9 +22,13 @@ ENV DEBIAN_FRONTEND=noninteractive
 # - If using compiled ffmpeg (netv-ffmpeg base): ffmpeg already present, just install python
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gosu \
-    python3 \
+    python3.11 \
+    python3.11-venv \
+    python3.11-distutils \
     python3-pip \
     $(if [ ! -f /usr/local/bin/ffmpeg ]; then echo "ffmpeg"; fi) \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python3 \
+    && python3.11 -m pip install --no-cache-dir --upgrade pip \
     && rm -rf /var/lib/apt/lists/*
 
 # App setup
