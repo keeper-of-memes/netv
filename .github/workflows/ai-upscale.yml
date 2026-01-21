@@ -109,7 +109,7 @@ jobs:
 
             # Verify non-NVIDIA dependencies are satisfied
             # Note: TensorRT (libnvinfer) is loaded via dlopen, so exclude it and CUDA from the check
-            MISSING=\$(echo \"\$LDD_OUTPUT\" | grep 'not found' | grep -v -E 'libcudart|libcuda' || true)
+            MISSING=\$(echo \"\$LDD_OUTPUT\" | grep 'not found' | grep -v -E 'libnvinfer|libnvonnxparser|libcudart|libcuda' || true)
             if [ -n \"\$MISSING\" ]; then
               echo 'ERROR: Missing non-NVIDIA libraries:'
               echo \"\$MISSING\"
