@@ -58,9 +58,14 @@ def _detect_vaapi_device() -> str | None:
 
 
 def _detect_libva_driver() -> str | None:
-    """Auto-detect LIBVA driver name. Returns 'i965', 'radeonsi', or None."""
+    """Auto-detect LIBVA driver name. Returns 'iHD', 'i965', 'radeonsi', or None."""
     vendor = _get_gpu_vendor()
     if vendor == "8086":
+        # iHD for Intel Gen8+ (Broadwell 2014+), supports Xe driver
+        # Fall back to i965 for older Intel GPUs
+        dri_path = _detect_dri_path()
+        if dri_path and pathlib.Path(f"{dri_path}/iHD_drv_video.so").exists():
+            return "iHD"
         return "i965"
     if vendor == "1002":
         return "radeonsi"
