@@ -105,4 +105,10 @@ jobs:
       - name: Verify image
         run: |
           docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:cuda${{ steps.cuda.outputs.version }}
-          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:cuda${{ steps.cuda.outputs.version }} ffmpeg -version
+          # Can't run ffmpeg (needs NVIDIA libs from host), but verify binary exists and is linked correctly
+          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:cuda${{ steps.cuda.outputs.version }} sh -c "
+            test -x /usr/local/bin/ffmpeg || { echo 'ERROR: ffmpeg not found'; exit 1; }
+            ldd /usr/local/bin/ffmpeg | grep -q libnvinfer || { echo 'ERROR: TensorRT not linked'; exit 1; }
+            ldd /usr/local/bin/ffmpeg | grep -q libcudart || { echo 'ERROR: CUDA not linked'; exit 1; }
+            echo 'Verified: ffmpeg exists, TensorRT linked, CUDA linked'
+          "
