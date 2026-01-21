@@ -375,11 +375,13 @@ def detect_encoders() -> dict[str, bool]:
         log.info("  QSV (h264_qsv): unavailable - %s", err)
 
     # VA-API: needs device, hwupload, and driver env vars for hybrid GPU systems
+    vaapi_baseline_only = False
     if VAAPI_DEVICE and LIBVA_DRIVER and DRI_PATH:
         vaapi_env = {
             "LIBVA_DRIVER_NAME": LIBVA_DRIVER,
             "LIBVA_DRIVERS_PATH": DRI_PATH,
         }
+        # Try high profile first, fall back to constrained_baseline for older GPUs
         ok, err = _test_encoder(
             base_cmd
             + ["-init_hw_device", f"vaapi=va:{VAAPI_DEVICE}"]
@@ -388,10 +390,34 @@ def detect_encoders() -> dict[str, bool]:
             + null_out,
             env=vaapi_env,
         )
+        if not ok:
+            # Some older AMD GPUs (GCN 1.0) only support baseline profile
+            ok, err = _test_encoder(
+                base_cmd
+                + ["-init_hw_device", f"vaapi=va:{VAAPI_DEVICE}"]
+                + test_input
+                + [
+                    "-vf",
+                    "format=nv12,hwupload",
+                    "-c:v",
+                    "h264_vaapi",
+                    "-profile:v",
+                    "constrained_baseline",
+                ]
+                + null_out,
+                env=vaapi_env,
+            )
+            if ok:
+                vaapi_baseline_only = True
         encoders["vaapi"] = ok
+        encoders["vaapi_baseline_only"] = vaapi_baseline_only
         if ok:
+            profile_note = " (baseline only)" if vaapi_baseline_only else ""
             log.info(
-                "  VAAPI (h264_vaapi): available (device=%s, driver=%s)", VAAPI_DEVICE, LIBVA_DRIVER
+                "  VAAPI (h264_vaapi): available%s (device=%s, driver=%s)",
+                profile_note,
+                VAAPI_DEVICE,
+                LIBVA_DRIVER,
             )
         else:
             log.info("  VAAPI (h264_vaapi): unavailable - %s", err)

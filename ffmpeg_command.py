@@ -17,7 +17,7 @@ import threading
 import time
 
 # Import VAAPI auto-detection results (avoid circular import by importing constants only)
-from cache import VAAPI_DEVICE
+from cache import AVAILABLE_ENCODERS, VAAPI_DEVICE
 
 
 log = logging.getLogger(__name__)
@@ -1095,7 +1095,12 @@ def _build_video_args(
             deint = "deinterlace_vaapi," if deinterlace else ""
             vf = f"format=nv12,hwupload,{deint}{tonemap}{scale}"
         encoder = "h264_vaapi"
-        enc_opts = ["-rc_mode", "CQP", "-qp", str(qp), "-bf", "3"]
+        # Use baseline profile for older GPUs (e.g., AMD GCN 1.0) that don't support High profile
+        if AVAILABLE_ENCODERS.get("vaapi_baseline_only"):
+            # Baseline doesn't support B-frames
+            enc_opts = ["-rc_mode", "CQP", "-qp", str(qp), "-profile:v", "constrained_baseline"]
+        else:
+            enc_opts = ["-rc_mode", "CQP", "-qp", str(qp), "-bf", "3"]
 
     elif enc_type == "qsv":
         if use_hw_pipeline:

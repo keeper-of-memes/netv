@@ -261,6 +261,7 @@ class TestEncoderDetection:
                 "amf": True,
                 "qsv": True,
                 "vaapi": True,
+                "vaapi_baseline_only": False,
             }
 
     def test_detect_encoders_none_available(self):
@@ -329,12 +330,15 @@ class TestEncoderDetection:
         ):
             cache.detect_encoders()
 
-        # Find VAAPI command
+        # Find VAAPI commands (now 2: High profile first, then baseline fallback)
         vaapi_cmds = [c for c in captured_cmds if "h264_vaapi" in c]
-        assert len(vaapi_cmds) == 1
-        vaapi_cmd = vaapi_cmds[0]
-        assert "-init_hw_device" in vaapi_cmd
-        assert "hwupload" in " ".join(vaapi_cmd)
+        assert len(vaapi_cmds) == 2
+        # First command: High profile (default, no -profile:v)
+        assert "-init_hw_device" in vaapi_cmds[0]
+        assert "hwupload" in " ".join(vaapi_cmds[0])
+        assert "constrained_baseline" not in " ".join(vaapi_cmds[0])
+        # Second command: constrained_baseline fallback
+        assert "constrained_baseline" in " ".join(vaapi_cmds[1])
 
     def test_detect_encoders_qsv_command_structure(self):
         """Test detect_encoders passes correct QSV command structure."""
