@@ -279,7 +279,7 @@ def _build_sr_filter(source_height: int, target_height: int) -> str:
         f"pad={engine_width}:{engine_height}:(ow-iw)/2:(oh-ih)/2,"
         f"format=rgb24,"
         f"hwupload,"
-        f"dnn_processing=dnn_backend=8:model={engine_path}"
+        f"dnn_processing=dnn_backend=tensorrt:model={engine_path}"
     )
     if target_height:
         # After dnn_processing, data is on GPU - use scale_cuda with explicit params

@@ -222,7 +222,8 @@ static int load_libs(void *log_ctx) {
 
     // Get TensorRT factory function
     const char *create_runtime_names[] = {
-        "_ZN8nvinfer118createInferRuntimeERNS_7ILoggerE",  // GCC mangling
+        "createInferRuntime_INTERNAL",  // TensorRT 10+
+        "_ZN8nvinfer118createInferRuntimeERNS_7ILoggerE",  // GCC mangling (TRT 8-9)
         "createInferRuntime",  // Some builds export unmangled
         NULL
     };
