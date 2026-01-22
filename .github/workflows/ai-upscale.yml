@@ -108,7 +108,8 @@ jobs:
             done
 
             # Verify non-NVIDIA dependencies are satisfied
-            # Note: TensorRT (libnvinfer) is loaded via dlopen, so exclude it and CUDA from the check
+            # Note: All NVIDIA libraries (libnvinfer, libcuda, libcudart) are loaded via dlopen,
+            # so ffmpeg works even without NVIDIA GPU/drivers installed
             MISSING=\$(echo \"\$LDD_OUTPUT\" | grep 'not found' | grep -v -E 'libnvinfer|libnvonnxparser|libcudart|libcuda' || true)
             if [ -n \"\$MISSING\" ]; then
               echo 'ERROR: Missing non-NVIDIA libraries:'
@@ -117,9 +118,12 @@ jobs:
             fi
             echo 'OK: All non-NVIDIA dependencies satisfied'
 
-            # Verify CUDA is linked (needed for CUDA kernels)
-            echo \"\$LDD_OUTPUT\" | grep -q libcudart || { echo 'ERROR: CUDA (libcudart) not linked'; exit 1; }
-            echo 'OK: libcudart linked'
+            # Verify ffmpeg has NO hard CUDA dependency (all CUDA/TensorRT loaded via dlopen)
+            if echo \"\$LDD_OUTPUT\" | grep -q 'libcudart'; then
+              echo 'ERROR: libcudart linked at compile time (should use dlopen)'
+              exit 1
+            fi
+            echo 'OK: No libcudart dependency (CUDA Driver API via dlopen)'
             echo 'OK: libnvinfer loaded via dlopen (not in ldd output)'
 
             # Verify Python AI packages installed (use pip show, not import - import needs CUDA runtime)

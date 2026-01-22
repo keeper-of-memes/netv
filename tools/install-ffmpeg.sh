@@ -1029,19 +1029,41 @@ typedef struct TRTOptions {\
         echo "Patched dnn_interface.c"
     fi
 
-    # Patch dnn/Makefile to add TensorRT objects and CUDA kernel compilation
+    # Patch dnn/Makefile to add TensorRT objects and CUDA kernel PTX compilation
     DNN_MAKEFILE="$FFMPEG_DIR/libavfilter/dnn/Makefile"
     if [ -f "$DNN_MAKEFILE" ] && ! grep -q "CONFIG_LIBTENSORRT" "$DNN_MAKEFILE"; then
         # Add TensorRT backend object
         sed -i '/CONFIG_LIBTORCH.*dnn_backend_torch/a DNN-OBJS-$(CONFIG_LIBTENSORRT)             += dnn/dnn_backend_tensorrt.o' "$DNN_MAKEFILE"
-        # Add CUDA kernels object
-        sed -i '/dnn_backend_tensorrt.o/a DNN-OBJS-$(CONFIG_LIBTENSORRT)               += dnn/dnn_cuda_kernels.o' "$DNN_MAKEFILE"
-        # Add CUDA kernel compilation rule (compile to object, not PTX)
-        echo '' >> "$DNN_MAKEFILE"
-        echo '# CUDA kernel compilation rule - compile to object file (not PTX)' >> "$DNN_MAKEFILE"
-        echo 'libavfilter/dnn/dnn_cuda_kernels.o: libavfilter/dnn/dnn_cuda_kernels.cu' >> "$DNN_MAKEFILE"
-        echo '	$(NVCC) -c -o $@ $< -m64 --compiler-options '"'"'-fPIC'"'"' -I$(SRC_PATH)' >> "$DNN_MAKEFILE"
-        echo "Patched dnn/Makefile with TensorRT and CUDA kernel support"
+        # Add embedded PTX object (compiled PTX as C byte array)
+        sed -i '/dnn_backend_tensorrt.o/a DNN-OBJS-$(CONFIG_LIBTENSORRT)               += dnn/dnn_cuda_kernels_ptx.o' "$DNN_MAKEFILE"
+        # Add PTX compilation and embedding rules
+        # 1. Compile .cu to .ptx with nvcc
+        # 2. Embed .ptx as C byte array using xxd (bin2c alternative)
+        # 3. Compile embedded C to object
+        cat >> "$DNN_MAKEFILE" << 'PTXRULES'
+
+# CUDA kernel PTX compilation and embedding (no cudart dependency)
+# Step 1: Compile CUDA kernels to PTX (intermediate representation)
+libavfilter/dnn/dnn_cuda_kernels.ptx: libavfilter/dnn/dnn_cuda_kernels.cu
+	$(NVCC) --ptx -o $@ $< -m64
+
+# Step 2: Embed PTX as C byte array (using xxd, like bin2c)
+libavfilter/dnn/dnn_cuda_kernels_ptx.c: libavfilter/dnn/dnn_cuda_kernels.ptx
+	@echo "Embedding PTX as C byte array..."
+	@echo "/* Auto-generated - do not edit */" > $@
+	@echo "#include <stddef.h>" >> $@
+	@echo "" >> $@
+	@printf "const unsigned char ff_dnn_cuda_kernels_ptx[] = {\n" >> $@
+	@xxd -i < $< >> $@
+	@echo "};" >> $@
+	@echo "" >> $@
+	@printf "const unsigned int ff_dnn_cuda_kernels_ptx_len = sizeof(ff_dnn_cuda_kernels_ptx);\n" >> $@
+
+# Step 3: Compile embedded PTX C file to object
+libavfilter/dnn/dnn_cuda_kernels_ptx.o: libavfilter/dnn/dnn_cuda_kernels_ptx.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+PTXRULES
+        echo "Patched dnn/Makefile with TensorRT and CUDA PTX kernel support"
     fi
 
     # Patch configure to add --enable-libtensorrt option
@@ -1089,13 +1111,12 @@ if [ "$ENABLE_LIBTORCH" = "1" ]; then
     fi
     EXTRA_LDFLAGS="$EXTRA_LDFLAGS -L$LIB_DIR -Wl,-rpath,$LIB_DIR"
 fi
-TENSORRT_EXTRA_LIBS=""
 if [ "$ENABLE_TENSORRT" = "1" ]; then
     # TensorRT needs C++ flags with CUDA headers (uses require_cxx for detection)
-    # Also need to link cudart for CUDA kernels (TensorRT itself is dlopen'd)
+    # Note: We use CUDA Driver API (libcuda.so) loaded via dlopen at runtime,
+    # NOT CUDA Runtime API (libcudart.so). This avoids load-time dependency.
     if [ "$ENABLE_NVIDIA_CUDA" = "1" ]; then
         EXTRA_CXXFLAGS="$EXTRA_CXXFLAGS -I$CUDA_PATH/include"
-        TENSORRT_EXTRA_LIBS="-lcudart"
     fi
 fi
 CONFIGURE_CMD=(
@@ -1105,7 +1126,7 @@ CONFIGURE_CMD=(
     --extra-cflags="$EXTRA_CFLAGS"
     --extra-cxxflags="$EXTRA_CXXFLAGS"
     --extra-ldflags="$EXTRA_LDFLAGS"
-    --extra-libs="-lpthread -lm -ldl${TORCH_EXTRA_LIBS:+ $TORCH_EXTRA_LIBS}${TENSORRT_EXTRA_LIBS:+ $TENSORRT_EXTRA_LIBS}"
+    --extra-libs="-lpthread -lm -ldl${TORCH_EXTRA_LIBS:+ $TORCH_EXTRA_LIBS}"
     --ld="g++"
     --bindir="$BIN_DIR"
     --disable-debug
