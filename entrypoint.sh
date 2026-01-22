@@ -28,13 +28,23 @@ mkdir -p /app/cache/users
 # Add netv user to render device group (for VAAPI hardware encoding)
 if [ -e /dev/dri/renderD128 ]; then
     RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
-    if ! groupadd --gid "$RENDER_GID" hostrender 2>/dev/null; then
-        # Group may already exist with different name, that's OK
-        :
+    RENDER_ADDED=false
+    if groupadd --gid "$RENDER_GID" hostrender 2>/dev/null; then
+        :  # Created new group
     fi
-    if ! usermod -aG hostrender netv 2>/dev/null; then
+    if usermod -aG hostrender netv 2>/dev/null; then
+        RENDER_ADDED=true
+    fi
+    if [ "$RENDER_ADDED" = "false" ]; then
         echo "WARNING: Could not add netv to render group (GID $RENDER_GID)"
-        echo "VAAPI hardware encoding may not be available"
+        if [ "$RENDER_GID" = "65534" ]; then
+            echo "  GID 65534 (nogroup) indicates Docker user namespace mapping issue."
+            echo "  This is usually harmless - VAAPI may still work if container has device access."
+            echo "  To fix: ensure 'render' group exists on host and user is in it, or use --privileged"
+        else
+            echo "  VAAPI hardware encoding may not be available."
+            echo "  To fix on host: sudo usermod -aG render \$USER (then restart Docker)"
+        fi
     fi
 fi
 
