@@ -24,6 +24,19 @@ if ! gosu netv sh -c "touch /app/cache/.perm_test && rm /app/cache/.perm_test" 2
     echo "Cache operations may fail. Check volume permissions."
 fi
 mkdir -p /app/cache/users
+if [ "$(stat -c '%U' /app/cache/users)" != "netv" ]; then
+    chown -R netv:netv /app/cache/users 2>/dev/null || true
+fi
+# Ensure writable even on filesystems that ignore chown (e.g., some NAS mounts)
+if ! gosu netv sh -c "touch /app/cache/users/.perm_test && rm /app/cache/users/.perm_test" 2>/dev/null; then
+    chmod -R u+rwX,g+rwX /app/cache/users 2>/dev/null || true
+    chmod g+s /app/cache/users 2>/dev/null || true
+fi
+# Final verification - warn if still not writable
+if ! gosu netv sh -c "touch /app/cache/users/.perm_test && rm /app/cache/users/.perm_test" 2>/dev/null; then
+    echo "WARNING: /app/cache/users is not writable by netv user"
+    echo "Cache operations may fail. Check volume permissions."
+fi
 
 # Add netv user to render device group (for VAAPI hardware encoding)
 if [ -e /dev/dri/renderD128 ]; then
