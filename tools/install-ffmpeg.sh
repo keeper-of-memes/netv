@@ -4,6 +4,177 @@
 # https://trac.ffmpeg.org/wiki/CompilationGuide/Ubuntu
 set -e
 
+# =============================================================================
+# Potentially Viable Pre-built FFmpeg alternatives
+#
+# DOCKER IMAGES
+#   LinuxServer docker-ffmpeg    https://github.com/linuxserver/docker-ffmpeg
+#     - Full hardware accel (NVENC, VAAPI, QSV)
+#     - Comprehensive codec support, builds libva 2.23+ from source
+#     - Used by Dispatcharr, basis for comparison with this script
+#
+# STATIC BINARIES (Linux)
+#   BtbN/FFmpeg-Builds           https://github.com/BtbN/FFmpeg-Builds
+#     - Daily automated builds from git master and release branches
+#     - GPL/LGPL/nonfree variants, static and shared options
+#     - Targets glibc 2.28+ (RHEL 8 / Ubuntu 20.04+)
+#     - CUDA support: sm_52+ (Maxwell and newer)
+#
+#   John Van Sickle              https://johnvansickle.com/ffmpeg/
+#     - Static builds for amd64, i686, armhf, arm64
+#     - GPL v3 licensed, targets kernel 3.2.0+
+#     - Note: static glibc = no DNS resolution (install nscd to fix)
+#
+# STATIC BINARIES (Windows)
+#   gyan.dev                     https://www.gyan.dev/ffmpeg/builds/
+#     - Essentials build: common codecs (Win 7+)
+#     - Full build: all codecs including bluray, opencl (Win 10+)
+#     - Official FFmpeg download page recommendation
+#
+# SPECIALIZED BUILDS
+#   Jellyfin-ffmpeg              https://github.com/jellyfin/jellyfin-ffmpeg
+#     - Modified FFmpeg with Jellyfin-specific patches
+#     - Optimized for media server transcoding
+#     - Ships with Jellyfin packages and Docker images
+#     - Recommended only for Jellyfin; other apps should use standard builds
+#
+# =============================================================================
+
+# =============================================================================
+# FFmpeg library reference (checked 2026-01)
+#
+# Priority: high    = essential for most workflows
+#           med     = useful for specific workflows
+#           low     = niche use cases
+#           subsumed= functionality covered by another library we use
+#           legacy  = outdated, superseded by newer codecs
+#
+# Enable: src = built from source, apt = use apt package, - = not enabled
+#
+#   Library          | Build  | Pri      | Apt Ver | Latest  | Description
+#   -----------------|--------|----------|---------|---------|---------------------------
+#   VIDEO CODECS
+#   libx264          | src    | high     | 0.164   | 0.165   | H.264/AVC encoder (8/10-bit)
+#   libx265          | src    | high     | 3.5     | 4.1     | H.265/HEVC encoder (8/10/12-bit)
+#   libsvtav1        | src    | high     | 1.7.0   | 3.0.2   | AV1 encoder (fast, scalable)
+#   libaom           | src    | high     | 3.8.2   | 3.13.1  | AV1 reference encoder/decoder
+#   libdav1d         | src    | high     | 1.4.1   | 1.5.3   | AV1 decoder (fastest)
+#   libvpx           | apt    | high     | 1.14.0  | 1.14.1  | VP8/VP9 encoder/decoder
+#   libvvenc         | -      | low      | -       | 1.13.1  | H.266/VVC encoder (too early)
+#   librav1e         | -      | subsumed | 0.7.1   | 0.8.1   | AV1 encoder - svtav1 faster
+#   libkvazaar       | -      | subsumed | 2.3.1   | 2.3.2   | HEVC encoder - x265 better
+#   libopenh264      | -      | subsumed | 2.6.0   | 2.6.0   | H.264 (Cisco) - x264 better
+#   libxvid          | -      | legacy   | 1.3.7   | 1.3.7   | MPEG-4 Part 2 (obsolete)
+#   libtheora        | -      | legacy   | 1.2.0a1 | 1.2.0   | Theora codec (obsolete)
+#
+#   IMAGE CODECS
+#   libwebp          | src    | high     | 1.3.2   | 1.6.0   | WebP image codec
+#   libjxl           | src    | high     | 0.7.0   | 0.11.1  | JPEG XL (next-gen, HDR)
+#   libopenjpeg      | -      | low      | 2.5.0   | 2.5.4   | JPEG 2000 (cinema/medical)
+#   librsvg          | -      | low      | 2.58.0  | 2.61.3  | SVG rasterization
+#   libsnappy        | -      | low      | 1.1.10  | 1.2.2   | Snappy compression (HAP codec)
+#
+#   AUDIO CODECS
+#   libfdk-aac       | apt    | high     | 2.0.2   | 2.0.3   | AAC encoder (best quality)
+#   libmp3lame       | apt    | high     | 3.100   | 3.100   | MP3 encoder
+#   libopus          | apt    | high     | 1.5.2   | 1.6     | Opus encoder/decoder
+#   libvorbis        | apt    | high     | 1.3.7   | 1.3.7   | Vorbis encoder/decoder
+#   librubberband    | apt    | med      | 3.3.0   | 4.0.0   | Audio time-stretch/pitch-shift
+#   liblc3           | -      | low      | 1.1.3   | 1.1.3   | LC3 Bluetooth audio codec
+#   libopencore-amr  | -      | legacy   | 0.1.6   | 0.1.6   | AMR-NB/WB (old mobile audio)
+#
+#   SUBTITLE/TEXT
+#   libass           | apt    | high     | 0.17.3  | 0.17.4  | ASS/SSA subtitle renderer
+#   libfreetype      | apt    | high     | 2.13.3  | 2.14.1  | Font rendering
+#   libfontconfig    | apt    | high     | 2.15.0  | 2.17.0  | Font configuration
+#   libfribidi       | apt    | med      | 1.0.16  | 1.0.16  | BiDi text (RTL languages)
+#   libharfbuzz      | apt    | med      | 10.2.0  | 12.3.0  | Complex text shaping
+#
+#   FILTERS/PROCESSING
+#   libzimg          | apt    | high     | 3.0.5   | 3.0.6   | High-quality image scaling
+#   libsoxr          | apt    | high     | 0.1.3   | 0.1.3   | High-quality audio resampling
+#   libvmaf          | src    | med      | 2.3.1   | 3.0.0   | Video quality metrics
+#   libplacebo       | src    | med      | 7.349.0 | 7.351.0 | GPU HDR tone mapping
+#   libshaderc       | src*   | med      | -       | -       | GLSL->SPIRV compiler (*via Vulkan SDK)
+#   libvidstab       | apt    | med      | 1.1.0   | 1.1.1   | Video stabilization
+#   libmysofa        | -      | low      | 1.3.3   | 1.3.3   | HRTF spatial audio (sofalizer)
+#   libtesseract     | -      | low      | 5.5.0   | 5.5.1   | OCR text extraction
+#   opencl           | apt    | low      | 2.3.3   | -       | GPU compute filters
+#
+#   HARDWARE ACCEL
+#   libva            | src    | high     | 2.20.0  | 2.23.0  | VA-API (Intel/AMD) - Xe support
+#   libvpl           | src    | high     | 2023.3  | 2.16.0  | Intel QuickSync Video
+#   cuda-nvcc        | src    | high     | -       | -       | NVIDIA CUDA compiler
+#   nvenc            | src    | high     | -       | -       | NVIDIA hardware encoder
+#   cuvid            | src    | high     | -       | -       | NVIDIA hardware decoder
+#   vaapi            | src    | high     | -       | -       | VA-API hwaccel
+#   nvdec            | src    | med      | -       | -       | NVIDIA hwaccel decode API
+#   vulkan           | src    | med      | -       | -       | Vulkan GPU compute
+#   cuda-llvm        | -      | subsumed | -       | -       | CUDA via clang - we use nvcc
+#   vdpau            | -      | legacy   | 1.5     | 1.5     | NVIDIA VDPAU (use nvdec)
+#
+#   PROTOCOLS/NETWORK
+#   openssl          | apt    | high     | 3.0.13  | 3.0.15  | TLS/HTTPS support
+#   libsrt           | apt    | high     | 1.5.3   | 1.5.4   | SRT streaming protocol
+#   libssh           | -      | low      | 0.10.6  | 0.11.1  | SFTP protocol
+#   librist          | -      | low      | 0.2.11  | 0.2.11  | RIST broadcast protocol
+#   libzmq           | -      | low      | 4.3.5   | 4.3.5   | ZeroMQ IPC messaging
+#   libxml2          | -      | low      | 2.9.14  | 2.13.5  | XML/DASH manifest parsing
+#
+#   INPUT/OUTPUT
+#   libbluray        | apt    | med      | 1.3.4   | 1.4.0   | Blu-ray disc reading
+#   libv4l2          | -      | low      | 1.28.1  | 1.28.1  | V4L2 webcam/capture
+#   alsa             | -      | low      | 1.2.14  | 1.2.14  | Linux ALSA audio input
+#
+#   META FLAGS
+#   gpl              | yes    | high     | -       | -       | Enable GPL-licensed code
+#   version3         | yes    | high     | -       | -       | Enable (L)GPL v3 code
+#   nonfree          | yes    | high     | -       | -       | Enable non-free code (fdk-aac)
+#
+# =============================================================================
+
+# Hardware acceleration (set to 1 to enable)
+ENABLE_NVIDIA_CUDA=${ENABLE_NVIDIA_CUDA:-1}  # NVENC/NVDEC hardware encoding/decoding
+ENABLE_AMD_AMF=${ENABLE_AMD_AMF:-1}          # AMD AMF hardware encoding (requires AMD GPU)
+ENABLE_LIBTORCH=${ENABLE_LIBTORCH:-0}        # LibTorch DNN backend for AI filters (default off, prefer TensorRT)
+ENABLE_TENSORRT=${ENABLE_TENSORRT:-1}        # TensorRT DNN backend for AI filters (fastest)
+
+# LibTorch CUDA variant (only used if ENABLE_LIBTORCH=1)
+# LIBTORCH_VARIANT options:
+#   "cu126"   - (default) CUDA 12.6 - compatible with LibTorch 2.7+
+#               Note: cu126 binaries work on CUDA 12.6+ runtimes (forward compatible)
+#   "auto"    - auto-detect from CUDA_VERSION, rounding minor to nearest even
+#               (PyTorch only releases cu126, cu128, cu130 - even minor versions)
+#               Examples: CUDA 12.9 -> cu128, CUDA 12.7 -> cu126, CUDA 13.x -> cu130
+#   "cpu"     - CPU-only (no GPU acceleration for DNN filters)
+#   "cu124"   - CUDA 12.4 (for older LibTorch 2.5.x)
+#   "cu126"   - force CUDA 12.6
+#   "cu128"   - force CUDA 12.8
+#   "cu130"   - force CUDA 13.0
+#   "rocm6.4" - AMD ROCm 6.4 (requires ROCm installed on host)
+LIBTORCH_VARIANT=${LIBTORCH_VARIANT:-cu126}
+
+# Optional build components (set to 0 to use apt package instead)
+BUILD_LIBPLACEBO=${BUILD_LIBPLACEBO:-1}  # GPU HDR tone mapping (requires Vulkan SDK)
+BUILD_LIBX265=${BUILD_LIBX265:-1}        # H.265/HEVC encoder (apt: 3.5, latest: 4.1)
+BUILD_LIBAOM=${BUILD_LIBAOM:-1}          # AV1 reference codec (apt: 3.8, latest: 3.13)
+BUILD_LIBWEBP=${BUILD_LIBWEBP:-1}        # WebP image codec (apt: 1.3, latest: 1.6)
+BUILD_LIBVPL=${BUILD_LIBVPL:-1}          # Intel QuickSync (apt: 2023.3, latest: 2.16)
+BUILD_LIBDAV1D=${BUILD_LIBDAV1D:-1}      # AV1 decoder (apt: 1.4.1, latest: 1.5.0)
+BUILD_LIBSVTAV1=${BUILD_LIBSVTAV1:-1}    # AV1 encoder (apt: 1.7.0, latest: 3.0.0)
+BUILD_LIBVMAF=${BUILD_LIBVMAF:-1}        # Video quality metrics (apt: 2.3.1, latest: 3.0.0)
+BUILD_LIBVA=${BUILD_LIBVA:-1}            # VA-API (apt: 2.20.0, latest: 2.23.0 - Xe support)
+BUILD_LIBJXL=${BUILD_LIBJXL:-1}          # JPEG XL (apt: 0.7.0, latest: 0.11.1)
+BUILD_LIBX264=${BUILD_LIBX264:-1}        # H.264 encoder (apt: 8-bit only, src: 8/10-bit)
+SVTAV1_GIT_REF=${SVTAV1_GIT_REF:-}
+
+# FFmpeg version: "snapshot" for latest git, or specific version like "7.1"
+FFMPEG_VERSION=${FFMPEG_VERSION:-snapshot}
+
+# Skip apt dependency installation (use if deps already installed, avoids sudo)
+SKIP_DEPS=${SKIP_DEPS:-0}
+PHASE=${PHASE:-all}
+
 # Noninteractive apt installs (prevents prompts)
 export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
 
@@ -217,177 +388,6 @@ download_file() {
 
     return 0
 }
-
-# =============================================================================
-# Potentially Viable Pre-built FFmpeg alternatives
-#
-# DOCKER IMAGES
-#   LinuxServer docker-ffmpeg    https://github.com/linuxserver/docker-ffmpeg
-#     - Full hardware accel (NVENC, VAAPI, QSV)
-#     - Comprehensive codec support, builds libva 2.23+ from source
-#     - Used by Dispatcharr, basis for comparison with this script
-#
-# STATIC BINARIES (Linux)
-#   BtbN/FFmpeg-Builds           https://github.com/BtbN/FFmpeg-Builds
-#     - Daily automated builds from git master and release branches
-#     - GPL/LGPL/nonfree variants, static and shared options
-#     - Targets glibc 2.28+ (RHEL 8 / Ubuntu 20.04+)
-#     - CUDA support: sm_52+ (Maxwell and newer)
-#
-#   John Van Sickle              https://johnvansickle.com/ffmpeg/
-#     - Static builds for amd64, i686, armhf, arm64
-#     - GPL v3 licensed, targets kernel 3.2.0+
-#     - Note: static glibc = no DNS resolution (install nscd to fix)
-#
-# STATIC BINARIES (Windows)
-#   gyan.dev                     https://www.gyan.dev/ffmpeg/builds/
-#     - Essentials build: common codecs (Win 7+)
-#     - Full build: all codecs including bluray, opencl (Win 10+)
-#     - Official FFmpeg download page recommendation
-#
-# SPECIALIZED BUILDS
-#   Jellyfin-ffmpeg              https://github.com/jellyfin/jellyfin-ffmpeg
-#     - Modified FFmpeg with Jellyfin-specific patches
-#     - Optimized for media server transcoding
-#     - Ships with Jellyfin packages and Docker images
-#     - Recommended only for Jellyfin; other apps should use standard builds
-#
-# =============================================================================
-
-# =============================================================================
-# FFmpeg library reference (checked 2026-01)
-#
-# Priority: high    = essential for most workflows
-#           med     = useful for specific workflows
-#           low     = niche use cases
-#           subsumed= functionality covered by another library we use
-#           legacy  = outdated, superseded by newer codecs
-#
-# Enable: src = built from source, apt = use apt package, - = not enabled
-#
-#   Library          | Build  | Pri      | Apt Ver | Latest  | Description
-#   -----------------|--------|----------|---------|---------|---------------------------
-#   VIDEO CODECS
-#   libx264          | src    | high     | 0.164   | 0.165   | H.264/AVC encoder (8/10-bit)
-#   libx265          | src    | high     | 3.5     | 4.1     | H.265/HEVC encoder (8/10/12-bit)
-#   libsvtav1        | src    | high     | 1.7.0   | 3.0.2   | AV1 encoder (fast, scalable)
-#   libaom           | src    | high     | 3.8.2   | 3.13.1  | AV1 reference encoder/decoder
-#   libdav1d         | src    | high     | 1.4.1   | 1.5.3   | AV1 decoder (fastest)
-#   libvpx           | apt    | high     | 1.14.0  | 1.14.1  | VP8/VP9 encoder/decoder
-#   libvvenc         | -      | low      | -       | 1.13.1  | H.266/VVC encoder (too early)
-#   librav1e         | -      | subsumed | 0.7.1   | 0.8.1   | AV1 encoder - svtav1 faster
-#   libkvazaar       | -      | subsumed | 2.3.1   | 2.3.2   | HEVC encoder - x265 better
-#   libopenh264      | -      | subsumed | 2.6.0   | 2.6.0   | H.264 (Cisco) - x264 better
-#   libxvid          | -      | legacy   | 1.3.7   | 1.3.7   | MPEG-4 Part 2 (obsolete)
-#   libtheora        | -      | legacy   | 1.2.0a1 | 1.2.0   | Theora codec (obsolete)
-#
-#   IMAGE CODECS
-#   libwebp          | src    | high     | 1.3.2   | 1.6.0   | WebP image codec
-#   libjxl           | src    | high     | 0.7.0   | 0.11.1  | JPEG XL (next-gen, HDR)
-#   libopenjpeg      | -      | low      | 2.5.0   | 2.5.4   | JPEG 2000 (cinema/medical)
-#   librsvg          | -      | low      | 2.58.0  | 2.61.3  | SVG rasterization
-#   libsnappy        | -      | low      | 1.1.10  | 1.2.2   | Snappy compression (HAP codec)
-#
-#   AUDIO CODECS
-#   libfdk-aac       | apt    | high     | 2.0.2   | 2.0.3   | AAC encoder (best quality)
-#   libmp3lame       | apt    | high     | 3.100   | 3.100   | MP3 encoder
-#   libopus          | apt    | high     | 1.5.2   | 1.6     | Opus encoder/decoder
-#   libvorbis        | apt    | high     | 1.3.7   | 1.3.7   | Vorbis encoder/decoder
-#   librubberband    | apt    | med      | 3.3.0   | 4.0.0   | Audio time-stretch/pitch-shift
-#   liblc3           | -      | low      | 1.1.3   | 1.1.3   | LC3 Bluetooth audio codec
-#   libopencore-amr  | -      | legacy   | 0.1.6   | 0.1.6   | AMR-NB/WB (old mobile audio)
-#
-#   SUBTITLE/TEXT
-#   libass           | apt    | high     | 0.17.3  | 0.17.4  | ASS/SSA subtitle renderer
-#   libfreetype      | apt    | high     | 2.13.3  | 2.14.1  | Font rendering
-#   libfontconfig    | apt    | high     | 2.15.0  | 2.17.0  | Font configuration
-#   libfribidi       | apt    | med      | 1.0.16  | 1.0.16  | BiDi text (RTL languages)
-#   libharfbuzz      | apt    | med      | 10.2.0  | 12.3.0  | Complex text shaping
-#
-#   FILTERS/PROCESSING
-#   libzimg          | apt    | high     | 3.0.5   | 3.0.6   | High-quality image scaling
-#   libsoxr          | apt    | high     | 0.1.3   | 0.1.3   | High-quality audio resampling
-#   libvmaf          | src    | med      | 2.3.1   | 3.0.0   | Video quality metrics
-#   libplacebo       | src    | med      | 7.349.0 | 7.351.0 | GPU HDR tone mapping
-#   libshaderc       | src*   | med      | -       | -       | GLSL->SPIRV compiler (*via Vulkan SDK)
-#   libvidstab       | apt    | med      | 1.1.0   | 1.1.1   | Video stabilization
-#   libmysofa        | -      | low      | 1.3.3   | 1.3.3   | HRTF spatial audio (sofalizer)
-#   libtesseract     | -      | low      | 5.5.0   | 5.5.1   | OCR text extraction
-#   opencl           | apt    | low      | 2.3.3   | -       | GPU compute filters
-#
-#   HARDWARE ACCEL
-#   libva            | src    | high     | 2.20.0  | 2.23.0  | VA-API (Intel/AMD) - Xe support
-#   libvpl           | src    | high     | 2023.3  | 2.16.0  | Intel QuickSync Video
-#   cuda-nvcc        | src    | high     | -       | -       | NVIDIA CUDA compiler
-#   nvenc            | src    | high     | -       | -       | NVIDIA hardware encoder
-#   cuvid            | src    | high     | -       | -       | NVIDIA hardware decoder
-#   vaapi            | src    | high     | -       | -       | VA-API hwaccel
-#   nvdec            | src    | med      | -       | -       | NVIDIA hwaccel decode API
-#   vulkan           | src    | med      | -       | -       | Vulkan GPU compute
-#   cuda-llvm        | -      | subsumed | -       | -       | CUDA via clang - we use nvcc
-#   vdpau            | -      | legacy   | 1.5     | 1.5     | NVIDIA VDPAU (use nvdec)
-#
-#   PROTOCOLS/NETWORK
-#   openssl          | apt    | high     | 3.0.13  | 3.0.15  | TLS/HTTPS support
-#   libsrt           | apt    | high     | 1.5.3   | 1.5.4   | SRT streaming protocol
-#   libssh           | -      | low      | 0.10.6  | 0.11.1  | SFTP protocol
-#   librist          | -      | low      | 0.2.11  | 0.2.11  | RIST broadcast protocol
-#   libzmq           | -      | low      | 4.3.5   | 4.3.5   | ZeroMQ IPC messaging
-#   libxml2          | -      | low      | 2.9.14  | 2.13.5  | XML/DASH manifest parsing
-#
-#   INPUT/OUTPUT
-#   libbluray        | apt    | med      | 1.3.4   | 1.4.0   | Blu-ray disc reading
-#   libv4l2          | -      | low      | 1.28.1  | 1.28.1  | V4L2 webcam/capture
-#   alsa             | -      | low      | 1.2.14  | 1.2.14  | Linux ALSA audio input
-#
-#   META FLAGS
-#   gpl              | yes    | high     | -       | -       | Enable GPL-licensed code
-#   version3         | yes    | high     | -       | -       | Enable (L)GPL v3 code
-#   nonfree          | yes    | high     | -       | -       | Enable non-free code (fdk-aac)
-#
-# =============================================================================
-
-# Hardware acceleration (set to 1 to enable)
-ENABLE_NVIDIA_CUDA=${ENABLE_NVIDIA_CUDA:-1}  # NVENC/NVDEC hardware encoding/decoding
-ENABLE_AMD_AMF=${ENABLE_AMD_AMF:-1}          # AMD AMF hardware encoding (requires AMD GPU)
-ENABLE_LIBTORCH=${ENABLE_LIBTORCH:-0}        # LibTorch DNN backend for AI filters (default off, prefer TensorRT)
-ENABLE_TENSORRT=${ENABLE_TENSORRT:-1}        # TensorRT DNN backend for AI filters (fastest)
-
-# LibTorch CUDA variant (only used if ENABLE_LIBTORCH=1)
-# LIBTORCH_VARIANT options:
-#   "cu126"   - (default) CUDA 12.6 - compatible with LibTorch 2.7+
-#               Note: cu126 binaries work on CUDA 12.6+ runtimes (forward compatible)
-#   "auto"    - auto-detect from CUDA_VERSION, rounding minor to nearest even
-#               (PyTorch only releases cu126, cu128, cu130 - even minor versions)
-#               Examples: CUDA 12.9 -> cu128, CUDA 12.7 -> cu126, CUDA 13.x -> cu130
-#   "cpu"     - CPU-only (no GPU acceleration for DNN filters)
-#   "cu124"   - CUDA 12.4 (for older LibTorch 2.5.x)
-#   "cu126"   - force CUDA 12.6
-#   "cu128"   - force CUDA 12.8
-#   "cu130"   - force CUDA 13.0
-#   "rocm6.4" - AMD ROCm 6.4 (requires ROCm installed on host)
-LIBTORCH_VARIANT=${LIBTORCH_VARIANT:-cu126}
-
-# Optional build components (set to 0 to use apt package instead)
-BUILD_LIBPLACEBO=${BUILD_LIBPLACEBO:-1}  # GPU HDR tone mapping (requires Vulkan SDK)
-BUILD_LIBX265=${BUILD_LIBX265:-1}        # H.265/HEVC encoder (apt: 3.5, latest: 4.1)
-BUILD_LIBAOM=${BUILD_LIBAOM:-1}          # AV1 reference codec (apt: 3.8, latest: 3.13)
-BUILD_LIBWEBP=${BUILD_LIBWEBP:-1}        # WebP image codec (apt: 1.3, latest: 1.6)
-BUILD_LIBVPL=${BUILD_LIBVPL:-1}          # Intel QuickSync (apt: 2023.3, latest: 2.16)
-BUILD_LIBDAV1D=${BUILD_LIBDAV1D:-1}      # AV1 decoder (apt: 1.4.1, latest: 1.5.0)
-BUILD_LIBSVTAV1=${BUILD_LIBSVTAV1:-1}    # AV1 encoder (apt: 1.7.0, latest: 3.0.0)
-BUILD_LIBVMAF=${BUILD_LIBVMAF:-1}        # Video quality metrics (apt: 2.3.1, latest: 3.0.0)
-BUILD_LIBVA=${BUILD_LIBVA:-1}            # VA-API (apt: 2.20.0, latest: 2.23.0 - Xe support)
-BUILD_LIBJXL=${BUILD_LIBJXL:-1}          # JPEG XL (apt: 0.7.0, latest: 0.11.1)
-BUILD_LIBX264=${BUILD_LIBX264:-1}        # H.264 encoder (apt: 8-bit only, src: 8/10-bit)
-SVTAV1_GIT_REF=${SVTAV1_GIT_REF:-}
-
-# FFmpeg version: "snapshot" for latest git, or specific version like "7.1"
-FFMPEG_VERSION=${FFMPEG_VERSION:-snapshot}
-
-# Skip apt dependency installation (use if deps already installed, avoids sudo)
-SKIP_DEPS=${SKIP_DEPS:-0}
-PHASE=${PHASE:-all}
 
 version_ge() {
     [ "$(printf '%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]
