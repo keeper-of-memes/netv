@@ -744,12 +744,14 @@ def probe_media(
     )
 
     # Build base probe command
+    # MPEG-TS streams (HDHomeRun, live TV) need ~1MB to reach first keyframe
+    # which contains the sequence header with dimensions. GOP at 15Mbps = ~1-2MB.
     base_cmd = [
         "ffprobe",
         "-probesize",
-        "50000",
+        "1000000",  # Had to increase for HDHomerun; was 50000.
         "-analyzeduration",
-        "500000",
+        "1500000",  # Had to increase for HDHomerun; was 500000.
         "-v",
         "quiet",
         "-print_format",
@@ -1270,7 +1272,7 @@ def build_hls_ffmpeg_cmd(
     # Hwaccel args (before -i)
     cmd.extend(video_pre)
 
-    # Probe args (when no media_info)
+    # Probe args (only when no media_info, since we already probed)
     if media_info is None:
         probe_size = "50000" if is_vod else "5000000"
         analyze_dur = "500000" if is_vod else "5000000"

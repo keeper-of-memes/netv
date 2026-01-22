@@ -47,6 +47,7 @@
 // CUDA Driver API types (from cuda.h - we dlopen libcuda.so instead of linking)
 // ============================================================================
 typedef int CUresult;
+typedef int CUdevice;
 typedef void* CUcontext;
 typedef void* CUmodule;
 typedef void* CUfunction;
@@ -57,10 +58,24 @@ typedef unsigned long long CUdeviceptr;
 
 // CUDA Driver API function pointer types
 typedef CUresult (*fn_cuInit)(unsigned int);
+typedef CUresult (*fn_cuDeviceGet)(CUdevice*, int);
+typedef CUresult (*fn_cuDevicePrimaryCtxRetain)(CUcontext*, CUdevice);
 typedef CUresult (*fn_cuCtxGetCurrent)(CUcontext*);
 typedef CUresult (*fn_cuCtxSetCurrent)(CUcontext);
+typedef CUresult (*fn_cuCtxPushCurrent)(CUcontext);
+typedef CUresult (*fn_cuCtxPopCurrent)(CUcontext*);
 typedef CUresult (*fn_cuMemAlloc)(CUdeviceptr*, size_t);
 typedef CUresult (*fn_cuMemFree)(CUdeviceptr);
+
+// CUDA Runtime API function pointers (for compatibility with TensorRT which uses Runtime API)
+// Note: cudaError_t is already defined via NvInfer.h -> cuda_runtime_api.h
+typedef cudaError_t (*fn_cudaMalloc)(void**, size_t);
+typedef cudaError_t (*fn_cudaFree)(void*);
+typedef cudaError_t (*fn_cudaSetDevice)(int);
+typedef cudaError_t (*fn_cudaMemcpyAsync)(void*, const void*, size_t, int, cudaStream_t);
+typedef cudaError_t (*fn_cudaStreamSynchronize)(cudaStream_t);
+#define cudaMemcpyHostToDevice 1
+#define cudaMemcpyDeviceToHost 2
 typedef CUresult (*fn_cuMemcpyHtoD)(CUdeviceptr, const void*, size_t);
 typedef CUresult (*fn_cuMemcpyDtoH)(void*, CUdeviceptr, size_t);
 typedef CUresult (*fn_cuMemcpyHtoDAsync)(CUdeviceptr, const void*, size_t, CUstream);
@@ -88,10 +103,18 @@ static std::mutex libs_load_mutex;
 
 // CUDA Driver API function pointers
 static fn_cuInit p_cuInit = NULL;
+static fn_cuDeviceGet p_cuDeviceGet = NULL;
+static fn_cuDevicePrimaryCtxRetain p_cuDevicePrimaryCtxRetain = NULL;
 static fn_cuCtxGetCurrent p_cuCtxGetCurrent = NULL;
 static fn_cuCtxSetCurrent p_cuCtxSetCurrent = NULL;
+static fn_cuCtxPushCurrent p_cuCtxPushCurrent = NULL;
+static fn_cuCtxPopCurrent p_cuCtxPopCurrent = NULL;
 static fn_cuMemAlloc p_cuMemAlloc = NULL;
 static fn_cuMemFree p_cuMemFree = NULL;
+static fn_cudaMalloc p_cudaMalloc = NULL;
+static fn_cudaFree p_cudaFree = NULL;
+static fn_cudaSetDevice p_cudaSetDevice = NULL;
+static void *cuda_rt_handle = NULL;  // libcudart.so handle
 static fn_cuMemcpyHtoD p_cuMemcpyHtoD = NULL;
 static fn_cuMemcpyDtoH p_cuMemcpyDtoH = NULL;
 static fn_cuMemcpyHtoDAsync p_cuMemcpyHtoDAsync = NULL;
@@ -173,8 +196,12 @@ static int load_libs(void *log_ctx) {
         }
 
     LOAD_CUDA_FUNC(cuInit);
+    LOAD_CUDA_FUNC(cuDeviceGet);
+    LOAD_CUDA_FUNC(cuDevicePrimaryCtxRetain);
     LOAD_CUDA_FUNC(cuCtxGetCurrent);
     LOAD_CUDA_FUNC(cuCtxSetCurrent);
+    LOAD_CUDA_FUNC(cuCtxPushCurrent);
+    LOAD_CUDA_FUNC(cuCtxPopCurrent);
     LOAD_CUDA_FUNC(cuMemAlloc);
     LOAD_CUDA_FUNC(cuMemFree);
     LOAD_CUDA_FUNC(cuMemcpyHtoD);
@@ -204,6 +231,27 @@ static int load_libs(void *log_ctx) {
 
     cuda_loaded = 1;
     av_log(log_ctx, AV_LOG_INFO, "CUDA driver API loaded via dlopen\n");
+
+    // Load CUDA Runtime API (required for TensorRT compatibility)
+    const char *cudart_names[] = {
+        "libcudart.so.12", "libcudart.so.11", "libcudart.so", NULL
+    };
+    for (int i = 0; cudart_names[i] && !cuda_rt_handle; i++) {
+        cuda_rt_handle = dlopen(cudart_names[i], RTLD_NOW);
+    }
+    if (!cuda_rt_handle) {
+        av_log(log_ctx, AV_LOG_ERROR, "Failed to load CUDA runtime library (libcudart.so)\n");
+        return AVERROR(ENOSYS);
+    }
+    p_cudaMalloc = (fn_cudaMalloc)dlsym(cuda_rt_handle, "cudaMalloc");
+    p_cudaFree = (fn_cudaFree)dlsym(cuda_rt_handle, "cudaFree");
+    p_cudaSetDevice = (fn_cudaSetDevice)dlsym(cuda_rt_handle, "cudaSetDevice");
+    if (!p_cudaMalloc || !p_cudaFree || !p_cudaSetDevice) {
+        av_log(log_ctx, AV_LOG_ERROR, "Failed to load CUDA runtime API functions\n");
+        dlclose(cuda_rt_handle);
+        cuda_rt_handle = NULL;
+        return AVERROR(ENOSYS);
+    }
 
     // Load TensorRT
     const char *nvinfer_names[] = {
@@ -667,19 +715,10 @@ static int fill_model_input_trt(TRTModel *trt_model, TRTRequestItem *request)
         return AVERROR(EINVAL);
     }
 
-    // Copy input to GPU using Driver API
-    CUresult err = p_cuMemcpyHtoDAsync(trt_model->input_buffer, input_data,
-                                        trt_model->input_size, trt_model->stream);
+    // Copy input to GPU using synchronous copy (safe to free buffer after)
+    CUresult err = p_cuMemcpyHtoD(trt_model->input_buffer, input_data, trt_model->input_size);
     if (err != CUDA_SUCCESS) {
         av_log(ctx, AV_LOG_ERROR, "Failed to copy input to GPU: %s\n", cuda_error_string(err));
-        av_freep(&input_data);
-        return AVERROR(EIO);
-    }
-
-    // CRITICAL: Must synchronize before freeing CPU buffer - async copy may still be reading it
-    err = p_cuStreamSynchronize(trt_model->stream);
-    if (err != CUDA_SUCCESS) {
-        av_log(ctx, AV_LOG_ERROR, "Stream sync after input copy failed: %s\n", cuda_error_string(err));
         av_freep(&input_data);
         return AVERROR(EIO);
     }
@@ -970,6 +1009,18 @@ static DNNModel *dnn_load_model_trt(DnnContext *ctx, DNNFunctionType func_type, 
         goto fail;
     }
 
+    // Set CUDA device for TensorRT operations
+    // We use cudaSetDevice (Runtime API) for compatibility with TensorRT
+    if (p_cudaSetDevice) {
+        int device_id = ctx->trt_option.device_id;
+        cudaError_t cuda_err = p_cudaSetDevice(device_id);
+        if (cuda_err != cudaSuccess) {
+            av_log(ctx, AV_LOG_ERROR, "cudaSetDevice(%d) failed: %d\n", device_id, cuda_err);
+            goto fail;
+        }
+        av_log(ctx, AV_LOG_DEBUG, "Set CUDA device %d for TensorRT\n", device_id);
+    }
+
     // Create TensorRT logger
     trt_model->logger = new TRTLogger(ctx);
 
@@ -1112,15 +1163,25 @@ static DNNModel *dnn_load_model_trt(DnnContext *ctx, DNNFunctionType func_type, 
             trt_model->output_size = (size_t)out_elems * sizeof(float);
         }
 
-        err = p_cuMemAlloc(&trt_model->input_buffer, trt_model->input_size);
-        if (err != CUDA_SUCCESS) {
-            av_log(ctx, AV_LOG_ERROR, "Failed to allocate input buffer: %s\n", cuda_error_string(err));
-            goto fail;
-        }
+        // Allocate GPU buffers using CUDA Runtime API (cudaMalloc)
+        // Runtime API is compatible with TensorRT which also uses Runtime API
+        if (p_cudaMalloc) {
+            void *input_ptr = NULL, *output_ptr = NULL;
+            cudaError_t cuda_err = p_cudaMalloc(&input_ptr, trt_model->input_size);
+            if (cuda_err != cudaSuccess) {
+                av_log(ctx, AV_LOG_ERROR, "cudaMalloc failed for input buffer: %d\n", cuda_err);
+                goto fail;
+            }
+            trt_model->input_buffer = (CUdeviceptr)input_ptr;
 
-        err = p_cuMemAlloc(&trt_model->output_buffer, trt_model->output_size);
-        if (err != CUDA_SUCCESS) {
-            av_log(ctx, AV_LOG_ERROR, "Failed to allocate output buffer: %s\n", cuda_error_string(err));
+            cuda_err = p_cudaMalloc(&output_ptr, trt_model->output_size);
+            if (cuda_err != cudaSuccess) {
+                av_log(ctx, AV_LOG_ERROR, "cudaMalloc failed for output buffer: %d\n", cuda_err);
+                goto fail;
+            }
+            trt_model->output_buffer = (CUdeviceptr)output_ptr;
+        } else {
+            av_log(ctx, AV_LOG_ERROR, "CUDA runtime API not available for buffer allocation\n");
             goto fail;
         }
     }
