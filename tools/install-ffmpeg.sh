@@ -960,10 +960,12 @@ if [ "$ENABLE_TENSORRT" = "1" ]; then
     fi
 
     # Copy CUDA kernels for GPU-resident format conversion (zero-copy)
+    # Rename to .cuda to prevent FFmpeg from auto-compiling it as .cu -> .o
+    # Our custom PTX rules in the Makefile will compile it properly
     if [ -f "$PATCH_DIR/dnn_cuda_kernels.cu" ]; then
-        cp "$PATCH_DIR/dnn_cuda_kernels.cu" "$FFMPEG_DIR/libavfilter/dnn/"
+        cp "$PATCH_DIR/dnn_cuda_kernels.cu" "$FFMPEG_DIR/libavfilter/dnn/dnn_cuda_kernels.cuda"
         cp "$PATCH_DIR/dnn_cuda_kernels.h" "$FFMPEG_DIR/libavfilter/dnn/"
-        echo "Copied CUDA format conversion kernels"
+        echo "Copied CUDA format conversion kernels (renamed to .cuda to avoid auto-build)"
     else
         echo "WARNING: dnn_cuda_kernels.cu not found in $PATCH_DIR"
     fi
@@ -1044,8 +1046,9 @@ typedef struct TRTOptions {\
 
 # CUDA kernel PTX compilation and embedding (no cudart dependency)
 # Step 1: Compile CUDA kernels to PTX (intermediate representation)
-libavfilter/dnn/dnn_cuda_kernels.ptx: libavfilter/dnn/dnn_cuda_kernels.cu
-	$(NVCC) --ptx -o $@ $< -m64
+# Source is .cuda (not .cu) to prevent FFmpeg from auto-compiling to .o
+libavfilter/dnn/dnn_cuda_kernels.ptx: libavfilter/dnn/dnn_cuda_kernels.cuda
+	$(NVCC) --ptx -o $@ -x cu $< -m64
 
 # Step 2: Embed PTX as C byte array (using xxd, like bin2c)
 libavfilter/dnn/dnn_cuda_kernels_ptx.c: libavfilter/dnn/dnn_cuda_kernels.ptx
@@ -1076,8 +1079,8 @@ PTXRULES
         # Add to dnn_deps_any
         sed -i 's/dnn_deps_any="libtensorflow libopenvino libtorch"/dnn_deps_any="libtensorflow libopenvino libtorch libtensorrt"/' "$CONFIGURE"
         # Add header check (after libtorch check)
-        # TensorRT (libnvinfer) is loaded via dlopen at runtime - don't link against it
-        # CUDA (libcudart) is linked via --extra-libs in configure command
+        # TensorRT (libnvinfer) and CUDA (libcuda) are loaded via dlopen at runtime.
+        # CUDA kernels are compiled to PTX and loaded via Driver API - no cudart dependency.
         sed -i '/enabled libtorch.*require_cxx libtorch/a\
 enabled libtensorrt       && check_cxxflags -std=c++17 && check_header NvInfer.h' "$CONFIGURE"
         echo "Patched configure (TensorRT via dlopen, CUDA linked for kernels)"

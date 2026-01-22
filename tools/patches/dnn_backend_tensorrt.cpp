@@ -117,7 +117,6 @@ extern "C" {
 #include "libavutil/avassert.h"
 #include "libavutil/internal.h"
 #include "libavutil/hwcontext.h"
-#include "libavutil/hwcontext_cuda.h"
 #include "libavutil/pixfmt.h"
 #include "libavutil/pixdesc.h"
 #include "queue.h"
