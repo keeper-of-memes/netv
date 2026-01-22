@@ -389,7 +389,7 @@ Tested on Ubuntu 24.04 LTS, 25.04, and 25.10.
 
 ```bash
 # Step 1: Remove existing NVIDIA packages
-sudo apt purge -y '^nvidia-.*' '^libnvidia-.*' '^cuda-.*' '^libcuda-.*' '^cudnn[0-9]*-.*' '^libcudnn[0-9]*-.*'
+sudo apt purge -y '^nv.*' '^libnv.*' '^cuda-.*' '^libcuda-.*' '^cudnn[0-9]*-.*' '^libcudnn[0-9]*-.*'
 sudo apt autoremove -y
 
 # Step 2: Add NVIDIA CUDA repository
@@ -400,14 +400,14 @@ sudo apt update
 
 # Step 3: Install driver and CUDA toolkit
 # For Turing+ GPUs (RTX 20 series and newer, compute >=7.5):
-sudo apt install -y nvidia-open cuda-toolkit-13 cudnn9-cuda-13 libcudnn9-dev-cuda-13
+sudo apt install -y nvidia-open cuda-toolkit-13 cudnn9-cuda-13 libcudnn9-dev-cuda-13 libnvinfer-bin
 
 # For Maxwell/Pascal GPUs (GTX 900/1000 series, compute <7.5):
-# Driver 590 dropped support. Pin to 580 and use CUDA 12.9.
+# Driver 590 dropped support. Pin to 580 and use CUDA 12.8.
 # Note: Maxwell/Pascal requires nvidia-driver (proprietary), not nvidia-open.
 # sudo apt install -y nvidia-driver-pinning-580
-# sudo apt install -y nvidia-driver-580 cuda-toolkit-12-9 cudnn9-cuda-12-9 libcudnn9-dev-cuda-12
-# sudo update-alternatives --set cuda /usr/local/cuda-12.9
+# sudo apt install -y nvidia-driver-580 cuda-toolkit-12-8 cudnn9-cuda-12-8 libcudnn9-dev-cuda-12 libnvinfer-bin
+# sudo update-alternatives --set cuda /usr/local/cuda-12.8
 
 # Step 4: Configure environment
 tee -a ~/.bashrc << 'EOF'
