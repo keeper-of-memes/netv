@@ -379,6 +379,8 @@ APT_PACKAGES=(
     libxcb-xfixes0-dev
     libxcb1-dev
     zlib1g-dev
+    # Intel oneVPL/QSV runtime (needed for Intel GPU hardware encoding)
+    libmfx-gen1.2
 )
 # Add apt packages for libraries we're not building from source
 [ "$BUILD_LIBX265" != "1" ] && APT_PACKAGES+=(libx265-dev)

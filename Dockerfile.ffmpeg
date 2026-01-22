@@ -222,6 +222,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     intel-media-va-driver-non-free \
     mesa-va-drivers \
     ocl-icd-libopencl1 \
+    # Intel oneVPL/QSV runtime for Intel GPU hardware encoding (modern Intel CPUs)
+    libmfx-gen1.2 \
     # Other deps
     zlib1g \
     $LIBUNISTRING \
