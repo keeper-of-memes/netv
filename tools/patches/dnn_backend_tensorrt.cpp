@@ -1389,7 +1389,7 @@ static DNNModel *dnn_load_model_trt(DnnContext *ctx, DNNFunctionType func_type, 
     // FFmpeg creates two filter instances: one for probing (never runs inference) and one for execution
     trt_model->context = nullptr;
 
-    // Create CUDA stream using Driver API
+    // Create CUDA stream for TensorRT operations
     err = p_cuStreamCreate(&trt_model->stream, 0);
     if (err != CUDA_SUCCESS) {
         av_log(ctx, AV_LOG_ERROR, "Failed to create CUDA stream: %s\n", cuda_error_string(err));
