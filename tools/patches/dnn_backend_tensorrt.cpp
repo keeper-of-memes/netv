@@ -763,10 +763,19 @@ static int fill_model_input_trt(TRTModel *trt_model, TRTRequestItem *request)
 static int trt_start_inference(void *args)
 {
     TRTRequestItem *request = (TRTRequestItem *)args;
-    LastLevelTaskItem *lltask = request->lltask;
-    TaskItem *task = lltask->task;
-    TRTModel *trt_model = (TRTModel *)task->model;
-    DnnContext *ctx = trt_model->ctx;
+    LastLevelTaskItem *lltask;
+    TaskItem *task;
+    TRTModel *trt_model;
+    DnnContext *ctx;
+
+    if (!request || !request->lltask) {
+        av_log(NULL, AV_LOG_ERROR, "TRTRequestItem or lltask is NULL\n");
+        return AVERROR(EINVAL);
+    }
+    lltask = request->lltask;
+    task = lltask->task;
+    trt_model = (TRTModel *)task->model;
+    ctx = trt_model->ctx;
 
     // Validate required resources exist
     if (!trt_model->context || !trt_model->stream) {

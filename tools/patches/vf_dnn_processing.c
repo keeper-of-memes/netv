@@ -314,7 +314,7 @@ static int flush_frame(AVFilterLink *outlink, int64_t pts, int64_t *out_pts)
 
     ret = ff_dnn_flush(&ctx->dnnctx);
     if (ret != 0) {
-        return -1;
+        return ret;
     }
 
     do {

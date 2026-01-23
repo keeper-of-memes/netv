@@ -248,8 +248,14 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
     input.dims[height_idx] = task->in_frame->height;
     input.dims[width_idx] = task->in_frame->width;
 
-    infer_request->input_tensor = new torch::Tensor();
-    infer_request->output = new torch::Tensor();
+    try {
+        infer_request->input_tensor = new torch::Tensor();
+        infer_request->output = new torch::Tensor();
+    } catch (const std::exception& e) {
+        av_log(ctx, AV_LOG_ERROR, "Failed to allocate torch tensors: %s\n", e.what());
+        ret = AVERROR(ENOMEM);
+        goto err;
+    }
 
     // Check for CUDA hardware frames (zero-copy input path)
     if (task->in_frame->format == AV_PIX_FMT_CUDA && task->in_frame->hw_frames_ctx) {
@@ -262,64 +268,70 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
         av_log(ctx, AV_LOG_DEBUG, "CUDA frame input: %dx%d, sw_format=%s, linesize=%d\n",
                width, height, av_get_pix_fmt_name(hw_frames->sw_format), linesize);
 
-        // Handle RGB24/BGR24 sw_format - zero-copy path (3 bytes per pixel)
-        if (hw_frames->sw_format == AV_PIX_FMT_RGB24 || hw_frames->sw_format == AV_PIX_FMT_BGR24) {
-            auto options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
+        try {
+            // Handle RGB24/BGR24 sw_format - zero-copy path (3 bytes per pixel)
+            if (hw_frames->sw_format == AV_PIX_FMT_RGB24 || hw_frames->sw_format == AV_PIX_FMT_BGR24) {
+                auto options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
 
-            // Create tensor from CUDA memory (HWC format, uint8)
-            torch::Tensor input_hwc = torch::from_blob(
-                cuda_data,
-                {height, width, 3},
-                {linesize, 3, 1},  // strides for row-major with padding
-                options
-            );
+                // Create tensor from CUDA memory (HWC format, uint8)
+                torch::Tensor input_hwc = torch::from_blob(
+                    cuda_data,
+                    {height, width, 3},
+                    {linesize, 3, 1},  // strides for row-major with padding
+                    options
+                );
 
-            // Convert: HWC uint8 [0,255] -> NCHW float32 [0,1]
-            *infer_request->input_tensor = input_hwc.permute({2, 0, 1})  // HWC -> CHW
-                                                    .unsqueeze(0)        // CHW -> NCHW
-                                                    .to(torch::kFloat32)
-                                                    .div(255.0f)
-                                                    .contiguous();
+                // Convert: HWC uint8 [0,255] -> NCHW float32 [0,1]
+                *infer_request->input_tensor = input_hwc.permute({2, 0, 1})  // HWC -> CHW
+                                                        .unsqueeze(0)        // CHW -> NCHW
+                                                        .to(torch::kFloat32)
+                                                        .div(255.0f)
+                                                        .contiguous();
 
-            av_log(ctx, AV_LOG_DEBUG, "Zero-copy CUDA input created (RGB24/BGR24)\n");
-            return 0;
-        }
-
-        // Handle RGB0/BGR0/0RGB/0BGR sw_format - zero-copy path (4 bytes per pixel, ignore alpha)
-        if (hw_frames->sw_format == AV_PIX_FMT_RGB0 || hw_frames->sw_format == AV_PIX_FMT_BGR0 ||
-            hw_frames->sw_format == AV_PIX_FMT_0RGB || hw_frames->sw_format == AV_PIX_FMT_0BGR ||
-            hw_frames->sw_format == AV_PIX_FMT_RGBA || hw_frames->sw_format == AV_PIX_FMT_BGRA ||
-            hw_frames->sw_format == AV_PIX_FMT_ARGB || hw_frames->sw_format == AV_PIX_FMT_ABGR) {
-            auto options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
-
-            // Create tensor from CUDA memory (4 channels, uint8)
-            torch::Tensor input_hwc4 = torch::from_blob(
-                cuda_data,
-                {height, width, 4},
-                {linesize, 4, 1},  // strides for row-major with padding
-                options
-            );
-
-            // Extract RGB channels based on format
-            torch::Tensor input_hwc;
-            if (hw_frames->sw_format == AV_PIX_FMT_RGB0 || hw_frames->sw_format == AV_PIX_FMT_BGR0 ||
-                hw_frames->sw_format == AV_PIX_FMT_RGBA || hw_frames->sw_format == AV_PIX_FMT_BGRA) {
-                // RGB(A) format: first 3 channels are R, G, B
-                input_hwc = input_hwc4.slice(2, 0, 3);  // slice along channel dim
-            } else {
-                // (A)RGB format: last 3 channels are R, G, B
-                input_hwc = input_hwc4.slice(2, 1, 4);  // slice along channel dim
+                av_log(ctx, AV_LOG_DEBUG, "Zero-copy CUDA input created (RGB24/BGR24)\n");
+                return 0;
             }
 
-            // Convert: HWC uint8 [0,255] -> NCHW float32 [0,1]
-            *infer_request->input_tensor = input_hwc.permute({2, 0, 1})  // HWC -> CHW
-                                                    .unsqueeze(0)        // CHW -> NCHW
-                                                    .to(torch::kFloat32)
-                                                    .div(255.0f)
-                                                    .contiguous();
+            // Handle RGB0/BGR0/0RGB/0BGR sw_format - zero-copy path (4 bytes per pixel, ignore alpha)
+            if (hw_frames->sw_format == AV_PIX_FMT_RGB0 || hw_frames->sw_format == AV_PIX_FMT_BGR0 ||
+                hw_frames->sw_format == AV_PIX_FMT_0RGB || hw_frames->sw_format == AV_PIX_FMT_0BGR ||
+                hw_frames->sw_format == AV_PIX_FMT_RGBA || hw_frames->sw_format == AV_PIX_FMT_BGRA ||
+                hw_frames->sw_format == AV_PIX_FMT_ARGB || hw_frames->sw_format == AV_PIX_FMT_ABGR) {
+                auto options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
 
-            av_log(ctx, AV_LOG_DEBUG, "Zero-copy CUDA input created (4-channel format)\n");
-            return 0;
+                // Create tensor from CUDA memory (4 channels, uint8)
+                torch::Tensor input_hwc4 = torch::from_blob(
+                    cuda_data,
+                    {height, width, 4},
+                    {linesize, 4, 1},  // strides for row-major with padding
+                    options
+                );
+
+                // Extract RGB channels based on format
+                torch::Tensor input_hwc;
+                if (hw_frames->sw_format == AV_PIX_FMT_RGB0 || hw_frames->sw_format == AV_PIX_FMT_BGR0 ||
+                    hw_frames->sw_format == AV_PIX_FMT_RGBA || hw_frames->sw_format == AV_PIX_FMT_BGRA) {
+                    // RGB(A) format: first 3 channels are R, G, B
+                    input_hwc = input_hwc4.slice(2, 0, 3);  // slice along channel dim
+                } else {
+                    // (A)RGB format: last 3 channels are R, G, B
+                    input_hwc = input_hwc4.slice(2, 1, 4);  // slice along channel dim
+                }
+
+                // Convert: HWC uint8 [0,255] -> NCHW float32 [0,1]
+                *infer_request->input_tensor = input_hwc.permute({2, 0, 1})  // HWC -> CHW
+                                                        .unsqueeze(0)        // CHW -> NCHW
+                                                        .to(torch::kFloat32)
+                                                        .div(255.0f)
+                                                        .contiguous();
+
+                av_log(ctx, AV_LOG_DEBUG, "Zero-copy CUDA input created (4-channel format)\n");
+                return 0;
+            }
+        } catch (const std::exception& e) {
+            av_log(ctx, AV_LOG_ERROR, "Torch exception in zero-copy input: %s\n", e.what());
+            ret = AVERROR(ENOSYS);
+            goto err;
         }
 
         av_log(ctx, AV_LOG_WARNING, "CUDA sw_format %s not supported for zero-copy, falling back to CPU\n",
@@ -378,6 +390,10 @@ static int th_start_inference(void *args)
     }
     infer_request = request->infer_request;
     lltask = request->lltask;
+    if (!lltask) {
+        av_log(NULL, AV_LOG_ERROR, "THRequestItem lltask is NULL\n");
+        return AVERROR(EINVAL);
+    }
     task = lltask->task;
     th_model = (THModel *)task->model;
     ctx = th_model->ctx;
@@ -391,21 +407,27 @@ static int th_start_inference(void *args)
         av_log(ctx, AV_LOG_ERROR, "input or output tensor is NULL\n");
         return DNN_GENERIC_ERROR;
     }
-    // Transfer tensor to the same device as model
-    c10::Device device = torch::kCUDA;
-    auto params = th_model->jit_model->parameters();
-    if (params.begin() != params.end()) {
-        device = (*params.begin()).device();
-    }
-    if (infer_request->input_tensor->device() != device)
-        *infer_request->input_tensor = infer_request->input_tensor->to(device);
-    inputs.push_back(*infer_request->input_tensor);
 
-    auto _fwd_out = th_model->jit_model->forward(inputs);
-    if (_fwd_out.isTuple()) {
-        *infer_request->output = _fwd_out.toTuple()->elements()[0].toTensor();
-    } else {
-        *infer_request->output = _fwd_out.toTensor();
+    try {
+        // Transfer tensor to the same device as model
+        c10::Device device = torch::kCUDA;
+        auto params = th_model->jit_model->parameters();
+        if (params.begin() != params.end()) {
+            device = (*params.begin()).device();
+        }
+        if (infer_request->input_tensor->device() != device)
+            *infer_request->input_tensor = infer_request->input_tensor->to(device);
+        inputs.push_back(*infer_request->input_tensor);
+
+        auto _fwd_out = th_model->jit_model->forward(inputs);
+        if (_fwd_out.isTuple()) {
+            *infer_request->output = _fwd_out.toTuple()->elements()[0].toTensor();
+        } else {
+            *infer_request->output = _fwd_out.toTensor();
+        }
+    } catch (const std::exception& e) {
+        av_log(ctx, AV_LOG_ERROR, "Torch inference failed: %s\n", e.what());
+        return DNN_GENERIC_ERROR;
     }
 
     return 0;
@@ -419,8 +441,10 @@ static void infer_completion_callback(void *args) {
     THInferRequest *infer_request = request->infer_request;
     THModel *th_model = (THModel *)task->model;
     torch::Tensor *output = infer_request->output;
+    c10::IntArrayRef sizes;
 
-    c10::IntArrayRef sizes = output->sizes();
+    try {
+        sizes = output->sizes();
     outputs.order = DCO_RGB;
     outputs.layout = DL_NCHW;
     outputs.dt = DNN_FLOAT;
@@ -585,6 +609,9 @@ static void infer_completion_callback(void *args) {
         goto err;
     }
     task->inference_done++;
+    } catch (const std::exception& e) {
+        av_log(th_model->ctx, AV_LOG_ERROR, "Torch exception in completion callback: %s\n", e.what());
+    }
 err:
     // Free lltask - it was popped from the queue in fill_model_input_th
     av_freep(&request->lltask);
@@ -619,7 +646,10 @@ static void th_worker_thread(THModel *th_model) {
         }
 
         if (request) {
-            th_start_inference(request);
+            int ret = th_start_inference(request);
+            if (ret < 0) {
+                av_log(NULL, AV_LOG_ERROR, "Async inference failed: %d\n", ret);
+            }
             infer_completion_callback(request);
         }
     }
