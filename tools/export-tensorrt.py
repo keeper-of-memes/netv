@@ -278,7 +278,7 @@ def export_onnx(model, opt_shape, onnx_path):
 
 
 def build_engine(
-    onnx_path, engine_path, min_shape, opt_shape, max_shape, fp16=False, workspace_gb=4
+    onnx_path, engine_path, min_shape, opt_shape, max_shape, fp16=False, fp16_io=False, workspace_gb=4
 ):
     """Build TensorRT engine from ONNX model with dynamic shapes."""
     import tensorrt as trt
@@ -292,7 +292,8 @@ def build_engine(
     print(f"    min: {min_w}x{min_h}")
     print(f"    opt: {opt_w}x{opt_h}")
     print(f"    max: {max_w}x{max_h}")
-    print(f"  FP16: {fp16}")
+    print(f"  FP16 compute: {fp16}")
+    print(f"  FP16 I/O: {fp16_io}")
     print(f"  Workspace: {workspace_gb} GB")
 
     logger = trt.Logger(trt.Logger.INFO)
@@ -319,9 +320,20 @@ def build_engine(
     if fp16:
         if builder.platform_has_fast_fp16:
             config.set_flag(trt.BuilderFlag.FP16)
-            print("  FP16 enabled")
+            print("  FP16 compute enabled")
         else:
             print("  Warning: FP16 not supported on this platform")
+
+    # Set FP16 I/O tensors (halves GPU memory for buffers)
+    if fp16_io:
+        if not builder.platform_has_fast_fp16:
+            print("  Warning: FP16 I/O requested but FP16 not supported, using FP32")
+        else:
+            for i in range(network.num_inputs):
+                network.get_input(i).dtype = trt.float16
+            for i in range(network.num_outputs):
+                network.get_output(i).dtype = trt.float16
+            print(f"  FP16 I/O enabled (input/output tensors use half precision)")
 
     print("  Building engine (this may take several minutes)...")
     serialized_engine = builder.build_serialized_network(network, config)
@@ -372,9 +384,13 @@ def main():
     )
     parser.add_argument("--output", "-o", type=str, default=None, help="Output engine path")
     parser.add_argument(
-        "--fp16", action="store_true", default=True, help="Enable FP16 precision (default: enabled)"
+        "--fp16", action="store_true", default=True, help="Enable FP16 compute precision (default: enabled)"
     )
-    parser.add_argument("--fp32", action="store_true", help="Use FP32 precision instead of FP16")
+    parser.add_argument("--fp32", action="store_true", help="Use FP32 compute precision instead of FP16")
+    parser.add_argument(
+        "--fp16-io", action="store_true", default=True, help="Use FP16 for I/O tensors (halves buffer memory, default: enabled)"
+    )
+    parser.add_argument("--fp32-io", action="store_true", help="Use FP32 for I/O tensors instead of FP16")
     parser.add_argument(
         "--workspace", type=int, default=8, help="TensorRT workspace size in GB (default: 8)"
     )
@@ -394,6 +410,8 @@ def main():
 
     if args.fp32:
         args.fp16 = False
+    if args.fp32_io:
+        args.fp16_io = False
 
     # Get model info for defaults
     try:
@@ -424,8 +442,10 @@ def main():
     max_shape = height_to_shape(max_h)
 
     if args.output is None:
-        suffix = "_fp16" if args.fp16 else "_fp32"
-        args.output = f"{model_name}_{opt_h}p{suffix}.engine"
+        # Suffix indicates compute precision and I/O precision
+        compute_suffix = "fp16" if args.fp16 else "fp32"
+        io_suffix = "_io16" if args.fp16_io else ""
+        args.output = f"{model_name}_{opt_h}p_{compute_suffix}{io_suffix}.engine"
 
     print("=" * 60)
     print("AI Upscale: TensorRT Engine Export")
@@ -467,6 +487,7 @@ def main():
             opt_shape=opt_shape,
             max_shape=max_shape,
             fp16=args.fp16,
+            fp16_io=args.fp16_io,
             workspace_gb=args.workspace,
         )
     finally:

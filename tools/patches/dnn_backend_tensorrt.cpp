@@ -42,6 +42,23 @@
 #include <cstring>
 #include <atomic>
 #include <mutex>
+#include <unordered_map>
+#include <string>
+
+// ============================================================================
+// Engine cache - avoid reloading same engine file multiple times
+// ============================================================================
+struct CachedEngine {
+    nvinfer1::ICudaEngine *engine;
+    nvinfer1::IRuntime *runtime;
+    std::atomic<int> refcount;
+
+    CachedEngine(nvinfer1::ICudaEngine *e, nvinfer1::IRuntime *r)
+        : engine(e), runtime(r), refcount(1) {}
+};
+
+static std::mutex g_engine_cache_mutex;
+static std::unordered_map<std::string, CachedEngine*> g_engine_cache;
 
 // ============================================================================
 // CUDA Driver API types (from cuda.h - we dlopen libcuda.so instead of linking)
@@ -353,27 +370,77 @@ public:
     }
 };
 
+// Supported tensor data types
+typedef enum TRTDataType {
+    TRT_DT_FLOAT32 = 0,  // 4 bytes
+    TRT_DT_FLOAT16 = 1,  // 2 bytes
+    TRT_DT_BFLOAT16 = 2, // 2 bytes
+    TRT_DT_INT8 = 3,     // 1 byte
+    TRT_DT_UINT8 = 4,    // 1 byte
+    TRT_DT_UNKNOWN = -1
+} TRTDataType;
+
+static const char *trt_dtype_name(TRTDataType dt) {
+    switch (dt) {
+        case TRT_DT_FLOAT32: return "FP32";
+        case TRT_DT_FLOAT16: return "FP16";
+        case TRT_DT_BFLOAT16: return "BF16";
+        case TRT_DT_INT8: return "INT8";
+        case TRT_DT_UINT8: return "UINT8";
+        default: return "UNKNOWN";
+    }
+}
+
+static size_t trt_dtype_size(TRTDataType dt) {
+    switch (dt) {
+        case TRT_DT_FLOAT32: return 4;
+        case TRT_DT_FLOAT16: return 2;
+        case TRT_DT_BFLOAT16: return 2;
+        case TRT_DT_INT8: return 1;
+        case TRT_DT_UINT8: return 1;
+        default: return 0;
+    }
+}
+
+static TRTDataType nvinfer_to_trt_dtype(nvinfer1::DataType dt) {
+    switch (dt) {
+        case nvinfer1::DataType::kFLOAT: return TRT_DT_FLOAT32;
+        case nvinfer1::DataType::kHALF: return TRT_DT_FLOAT16;
+        case nvinfer1::DataType::kBF16: return TRT_DT_BFLOAT16;
+        case nvinfer1::DataType::kINT8: return TRT_DT_INT8;
+        case nvinfer1::DataType::kUINT8: return TRT_DT_UINT8;
+        default: return TRT_DT_UNKNOWN;
+    }
+}
+
 typedef struct TRTModel {
     DNNModel model;
     DnnContext *ctx;
     nvinfer1::IRuntime *runtime;
     nvinfer1::ICudaEngine *engine;
-    nvinfer1::IExecutionContext *context;
+    nvinfer1::IExecutionContext *context;  // Lazily created on first inference
     TRTLogger *logger;
     CUstream stream;
 
+    // Engine cache entry (for refcounting shared engines)
+    CachedEngine *cached_engine;
+    char *engine_path;  // Key for cache lookup (av_strdup'd)
+
     // CUDA kernel module (loaded from PTX)
     CUmodule cuda_module;
-    CUfunction kernel_hwc_to_nchw;
-    CUfunction kernel_nchw_to_hwc;
-    CUfunction kernel_hwc4_to_nchw;
-    CUfunction kernel_nchw_to_hwc4;
+    // Kernels for each dtype: [0]=FP32, [1]=FP16, [2]=BF16
+    CUfunction kernel_hwc_to_nchw[3];
+    CUfunction kernel_nchw_to_hwc[3];
+    CUfunction kernel_hwc4_to_nchw[3];
+    CUfunction kernel_nchw_to_hwc4[3];
 
     // I/O tensor info (TensorRT 10.x API)
     char *input_name;
     char *output_name;
     nvinfer1::Dims input_dims;
     nvinfer1::Dims output_dims;
+    TRTDataType input_dtype;
+    TRTDataType output_dtype;
 
     // CUDA buffers (using CUdeviceptr for Driver API)
     CUdeviceptr input_buffer;
@@ -426,48 +493,64 @@ static int load_cuda_kernels(TRTModel *trt_model, void *log_ctx) {
         return AVERROR(ENOSYS);
     }
 
-    // Get kernel function handles
-    err = p_cuModuleGetFunction(&trt_model->kernel_hwc_to_nchw, trt_model->cuda_module,
-                                 DNN_CUDA_KERNEL_HWC_UINT8_TO_NCHW_FLOAT32);
-    if (err != CUDA_SUCCESS) {
-        av_log(log_ctx, AV_LOG_ERROR, "Failed to get kernel %s: %s\n",
-               DNN_CUDA_KERNEL_HWC_UINT8_TO_NCHW_FLOAT32, cuda_error_string(err));
-        p_cuModuleUnload(trt_model->cuda_module);
-        trt_model->cuda_module = NULL;
-        return AVERROR(ENOSYS);
+    // Kernel names for each dtype: [0]=FP32, [1]=FP16, [2]=BF16
+    const char *hwc_to_nchw_names[] = {
+        DNN_CUDA_KERNEL_HWC_UINT8_TO_NCHW_FLOAT32,
+        DNN_CUDA_KERNEL_HWC_UINT8_TO_NCHW_FLOAT16,
+        DNN_CUDA_KERNEL_HWC_UINT8_TO_NCHW_BFLOAT16
+    };
+    const char *nchw_to_hwc_names[] = {
+        DNN_CUDA_KERNEL_NCHW_FLOAT32_TO_HWC_UINT8,
+        DNN_CUDA_KERNEL_NCHW_FLOAT16_TO_HWC_UINT8,
+        DNN_CUDA_KERNEL_NCHW_BFLOAT16_TO_HWC_UINT8
+    };
+    const char *hwc4_to_nchw_names[] = {
+        DNN_CUDA_KERNEL_HWC4_UINT8_TO_NCHW_FLOAT32,
+        DNN_CUDA_KERNEL_HWC4_UINT8_TO_NCHW_FLOAT16,
+        DNN_CUDA_KERNEL_HWC4_UINT8_TO_NCHW_BFLOAT16
+    };
+    const char *nchw_to_hwc4_names[] = {
+        DNN_CUDA_KERNEL_NCHW_FLOAT32_TO_HWC4_UINT8,
+        DNN_CUDA_KERNEL_NCHW_FLOAT16_TO_HWC4_UINT8,
+        DNN_CUDA_KERNEL_NCHW_BFLOAT16_TO_HWC4_UINT8
+    };
+
+    // Load all kernel variants
+    for (int i = 0; i < 3; i++) {
+        err = p_cuModuleGetFunction(&trt_model->kernel_hwc_to_nchw[i], trt_model->cuda_module, hwc_to_nchw_names[i]);
+        if (err != CUDA_SUCCESS) {
+            av_log(log_ctx, AV_LOG_ERROR, "Failed to get kernel %s: %s\n", hwc_to_nchw_names[i], cuda_error_string(err));
+            p_cuModuleUnload(trt_model->cuda_module);
+            trt_model->cuda_module = NULL;
+            return AVERROR(ENOSYS);
+        }
+
+        err = p_cuModuleGetFunction(&trt_model->kernel_nchw_to_hwc[i], trt_model->cuda_module, nchw_to_hwc_names[i]);
+        if (err != CUDA_SUCCESS) {
+            av_log(log_ctx, AV_LOG_ERROR, "Failed to get kernel %s: %s\n", nchw_to_hwc_names[i], cuda_error_string(err));
+            p_cuModuleUnload(trt_model->cuda_module);
+            trt_model->cuda_module = NULL;
+            return AVERROR(ENOSYS);
+        }
+
+        err = p_cuModuleGetFunction(&trt_model->kernel_hwc4_to_nchw[i], trt_model->cuda_module, hwc4_to_nchw_names[i]);
+        if (err != CUDA_SUCCESS) {
+            av_log(log_ctx, AV_LOG_ERROR, "Failed to get kernel %s: %s\n", hwc4_to_nchw_names[i], cuda_error_string(err));
+            p_cuModuleUnload(trt_model->cuda_module);
+            trt_model->cuda_module = NULL;
+            return AVERROR(ENOSYS);
+        }
+
+        err = p_cuModuleGetFunction(&trt_model->kernel_nchw_to_hwc4[i], trt_model->cuda_module, nchw_to_hwc4_names[i]);
+        if (err != CUDA_SUCCESS) {
+            av_log(log_ctx, AV_LOG_ERROR, "Failed to get kernel %s: %s\n", nchw_to_hwc4_names[i], cuda_error_string(err));
+            p_cuModuleUnload(trt_model->cuda_module);
+            trt_model->cuda_module = NULL;
+            return AVERROR(ENOSYS);
+        }
     }
 
-    err = p_cuModuleGetFunction(&trt_model->kernel_nchw_to_hwc, trt_model->cuda_module,
-                                 DNN_CUDA_KERNEL_NCHW_FLOAT32_TO_HWC_UINT8);
-    if (err != CUDA_SUCCESS) {
-        av_log(log_ctx, AV_LOG_ERROR, "Failed to get kernel %s: %s\n",
-               DNN_CUDA_KERNEL_NCHW_FLOAT32_TO_HWC_UINT8, cuda_error_string(err));
-        p_cuModuleUnload(trt_model->cuda_module);
-        trt_model->cuda_module = NULL;
-        return AVERROR(ENOSYS);
-    }
-
-    err = p_cuModuleGetFunction(&trt_model->kernel_hwc4_to_nchw, trt_model->cuda_module,
-                                 DNN_CUDA_KERNEL_HWC4_UINT8_TO_NCHW_FLOAT32);
-    if (err != CUDA_SUCCESS) {
-        av_log(log_ctx, AV_LOG_ERROR, "Failed to get kernel %s: %s\n",
-               DNN_CUDA_KERNEL_HWC4_UINT8_TO_NCHW_FLOAT32, cuda_error_string(err));
-        p_cuModuleUnload(trt_model->cuda_module);
-        trt_model->cuda_module = NULL;
-        return AVERROR(ENOSYS);
-    }
-
-    err = p_cuModuleGetFunction(&trt_model->kernel_nchw_to_hwc4, trt_model->cuda_module,
-                                 DNN_CUDA_KERNEL_NCHW_FLOAT32_TO_HWC4_UINT8);
-    if (err != CUDA_SUCCESS) {
-        av_log(log_ctx, AV_LOG_ERROR, "Failed to get kernel %s: %s\n",
-               DNN_CUDA_KERNEL_NCHW_FLOAT32_TO_HWC4_UINT8, cuda_error_string(err));
-        p_cuModuleUnload(trt_model->cuda_module);
-        trt_model->cuda_module = NULL;
-        return AVERROR(ENOSYS);
-    }
-
-    av_log(log_ctx, AV_LOG_INFO, "CUDA format conversion kernels loaded from PTX\n");
+    av_log(log_ctx, AV_LOG_INFO, "CUDA format conversion kernels loaded (FP32/FP16/BF16)\n");
     return 0;
 }
 
@@ -490,6 +573,73 @@ static int launch_kernel(CUfunction func, CUstream stream,
         av_log(log_ctx, AV_LOG_ERROR, "Kernel launch failed: %s\n", cuda_error_string(err));
         return AVERROR(EIO);
     }
+    return 0;
+}
+
+// Lazily create execution context on first inference
+// Returns 0 on success, negative AVERROR on failure
+static int ensure_execution_context(TRTModel *trt_model, void *log_ctx)
+{
+    if (trt_model->context)
+        return 0;  // Already created
+
+    av_log(log_ctx, AV_LOG_INFO, "Creating TensorRT execution context (lazy init)\n");
+
+    trt_model->context = trt_model->engine->createExecutionContext();
+    if (!trt_model->context) {
+        av_log(log_ctx, AV_LOG_ERROR, "Failed to create execution context\n");
+        return AVERROR(ENOMEM);
+    }
+
+    // Allocate GPU buffers now that we have context
+    if (!trt_model->input_buffer) {
+        void *input_ptr = NULL, *output_ptr = NULL;
+        cudaError_t cuda_err = p_cudaMalloc(&input_ptr, trt_model->input_size);
+        if (cuda_err != cudaSuccess) {
+            av_log(log_ctx, AV_LOG_ERROR, "cudaMalloc failed for input buffer: %d\n", cuda_err);
+            delete trt_model->context;
+            trt_model->context = nullptr;
+            return AVERROR(ENOMEM);
+        }
+        trt_model->input_buffer = (CUdeviceptr)input_ptr;
+
+        cuda_err = p_cudaMalloc(&output_ptr, trt_model->output_size);
+        if (cuda_err != cudaSuccess) {
+            av_log(log_ctx, AV_LOG_ERROR, "cudaMalloc failed for output buffer: %d\n", cuda_err);
+            p_cudaFree((void*)trt_model->input_buffer);
+            trt_model->input_buffer = 0;
+            delete trt_model->context;
+            trt_model->context = nullptr;
+            return AVERROR(ENOMEM);
+        }
+        trt_model->output_buffer = (CUdeviceptr)output_ptr;
+
+        // Set tensor addresses
+        if (!trt_model->context->setTensorAddress(trt_model->input_name, (void*)trt_model->input_buffer)) {
+            av_log(log_ctx, AV_LOG_ERROR, "Failed to set input tensor address\n");
+            p_cudaFree((void*)trt_model->input_buffer);
+            p_cudaFree((void*)trt_model->output_buffer);
+            trt_model->input_buffer = 0;
+            trt_model->output_buffer = 0;
+            delete trt_model->context;
+            trt_model->context = nullptr;
+            return AVERROR(EINVAL);
+        }
+        if (!trt_model->context->setTensorAddress(trt_model->output_name, (void*)trt_model->output_buffer)) {
+            av_log(log_ctx, AV_LOG_ERROR, "Failed to set output tensor address\n");
+            p_cudaFree((void*)trt_model->input_buffer);
+            p_cudaFree((void*)trt_model->output_buffer);
+            trt_model->input_buffer = 0;
+            trt_model->output_buffer = 0;
+            delete trt_model->context;
+            trt_model->context = nullptr;
+            return AVERROR(EINVAL);
+        }
+
+        av_log(log_ctx, AV_LOG_INFO, "  Allocated GPU buffers: input=%zuMB output=%zuMB\n",
+               trt_model->input_size / (1024 * 1024), trt_model->output_size / (1024 * 1024));
+    }
+
     return 0;
 }
 
@@ -566,7 +716,7 @@ static void dnn_free_model_trt(DNNModel **model)
         trt_model->stream = NULL;
     }
 
-    // Free tensor names
+    // Free tensor names (engine_path freed after cache cleanup)
     av_freep(&trt_model->input_name);
     av_freep(&trt_model->output_name);
 
@@ -575,18 +725,56 @@ static void dnn_free_model_trt(DNNModel **model)
         delete trt_model->context;
         trt_model->context = nullptr;
     }
-    if (trt_model->engine) {
-        delete trt_model->engine;
+
+    // Handle cached engine - decrement refcount and only free when last reference
+    if (trt_model->cached_engine) {
+        std::lock_guard<std::mutex> lock(g_engine_cache_mutex);
+        int old_refcount = trt_model->cached_engine->refcount.load();
+        int remaining = --trt_model->cached_engine->refcount;
+        av_log(trt_model->ctx, AV_LOG_DEBUG, "Engine refcount: %d -> %d (path=%s)\n",
+               old_refcount, remaining, trt_model->engine_path ? trt_model->engine_path : "null");
+        if (remaining == 0) {
+            // Last reference - remove from cache and delete
+            if (trt_model->engine_path) {
+                std::string path_key(trt_model->engine_path);
+                size_t erased = g_engine_cache.erase(path_key);
+                av_log(trt_model->ctx, AV_LOG_DEBUG, "Erased %zu entries from cache\n", erased);
+            }
+            if (trt_model->cached_engine->engine) {
+                delete trt_model->cached_engine->engine;
+            }
+            if (trt_model->cached_engine->runtime) {
+                delete trt_model->cached_engine->runtime;
+            }
+            delete trt_model->cached_engine;
+            av_log(trt_model->ctx, AV_LOG_DEBUG, "Released last reference to cached engine\n");
+        } else if (remaining < 0) {
+            av_log(trt_model->ctx, AV_LOG_ERROR, "BUG: Engine refcount went negative (%d)!\n", remaining);
+        } else {
+            av_log(trt_model->ctx, AV_LOG_DEBUG, "Released engine reference (remaining=%d)\n", remaining);
+        }
+        trt_model->cached_engine = nullptr;
         trt_model->engine = nullptr;
-    }
-    if (trt_model->runtime) {
-        delete trt_model->runtime;
         trt_model->runtime = nullptr;
+    } else {
+        // Not cached (shouldn't happen normally, but handle gracefully)
+        if (trt_model->engine) {
+            delete trt_model->engine;
+            trt_model->engine = nullptr;
+        }
+        if (trt_model->runtime) {
+            delete trt_model->runtime;
+            trt_model->runtime = nullptr;
+        }
     }
+
     if (trt_model->logger) {
         delete trt_model->logger;
         trt_model->logger = nullptr;
     }
+
+    // Free engine path (after cache cleanup which uses it)
+    av_freep(&trt_model->engine_path);
 
     // Free queues
     if (trt_model->request_queue) {
@@ -650,6 +838,12 @@ static int fill_model_input_trt(TRTModel *trt_model, TRTRequestItem *request)
     DnnContext *ctx = trt_model->ctx;
     int ret;
 
+    // Ensure execution context and buffers are created (lazy initialization)
+    ret = ensure_execution_context(trt_model, ctx);
+    if (ret < 0) {
+        return ret;
+    }
+
     lltask = (LastLevelTaskItem *)ff_queue_pop_front(trt_model->lltask_queue);
     if (!lltask) {
         return AVERROR(EINVAL);
@@ -682,11 +876,12 @@ static int fill_model_input_trt(TRTModel *trt_model, TRTRequestItem *request)
         AVHWFramesContext *hw_frames = (AVHWFramesContext *)task->in_frame->hw_frames_ctx->data;
         int linesize = task->in_frame->linesize[0];
         CUdeviceptr cuda_data = (CUdeviceptr)task->in_frame->data[0];
+        int dtype_idx = (int)trt_model->input_dtype;  // Kernel array index: 0=FP32, 1=FP16, 2=BF16
 
-        // For RGB24/BGR24: convert uint8 HWC to float32 NCHW on GPU (zero-copy)
+        // For RGB24/BGR24: convert uint8 HWC to NCHW on GPU (zero-copy)
         if (hw_frames->sw_format == AV_PIX_FMT_RGB24 || hw_frames->sw_format == AV_PIX_FMT_BGR24) {
             void *args[] = {&cuda_data, &trt_model->input_buffer, &height, &width, &linesize};
-            ret = launch_kernel(trt_model->kernel_hwc_to_nchw, trt_model->stream,
+            ret = launch_kernel(trt_model->kernel_hwc_to_nchw[dtype_idx], trt_model->stream,
                                width, height, args, ctx);
             if (ret != 0) return ret;
             return 0;
@@ -701,7 +896,7 @@ static int fill_model_input_trt(TRTModel *trt_model, TRTRequestItem *request)
             }
             void *args[] = {&cuda_data, &trt_model->input_buffer, &height, &width, &linesize,
                            &r_off, &g_off, &b_off};
-            ret = launch_kernel(trt_model->kernel_hwc4_to_nchw, trt_model->stream,
+            ret = launch_kernel(trt_model->kernel_hwc4_to_nchw[dtype_idx], trt_model->stream,
                                width, height, args, ctx);
             if (ret != 0) return ret;
             return 0;
@@ -716,7 +911,7 @@ static int fill_model_input_trt(TRTModel *trt_model, TRTRequestItem *request)
             }
             void *args[] = {&cuda_data, &trt_model->input_buffer, &height, &width, &linesize,
                            &r_off, &g_off, &b_off};
-            ret = launch_kernel(trt_model->kernel_hwc4_to_nchw, trt_model->stream,
+            ret = launch_kernel(trt_model->kernel_hwc4_to_nchw[dtype_idx], trt_model->stream,
                                width, height, args, ctx);
             if (ret != 0) return ret;
             return 0;
@@ -726,7 +921,15 @@ static int fill_model_input_trt(TRTModel *trt_model, TRTRequestItem *request)
                av_get_pix_fmt_name(hw_frames->sw_format));
     }
 
-    // Standard CPU path - allocate buffer for preprocessing
+    // Standard CPU path - only supports FP32 engines
+    // For FP16/BF16, use CUDA hw frames for zero-copy path
+    if (trt_model->input_dtype != TRT_DT_FLOAT32) {
+        av_log(ctx, AV_LOG_ERROR, "CPU input path only supports FP32 engines, got %s. "
+               "Use hwupload to provide CUDA frames for FP16/BF16 zero-copy.\n",
+               trt_dtype_name(trt_model->input_dtype));
+        return AVERROR(ENOSYS);
+    }
+
     size_t input_elements = input.dims[0] * input.dims[1] * input.dims[2] * input.dims[3];
     float *input_data = (float *)av_malloc(input_elements * sizeof(float));
     if (!input_data) {
@@ -841,11 +1044,12 @@ static void infer_completion_callback(void *args)
         AVHWFramesContext *hw_frames = (AVHWFramesContext *)task->out_frame->hw_frames_ctx->data;
         int out_linesize = task->out_frame->linesize[0];
         CUdeviceptr cuda_out = (CUdeviceptr)task->out_frame->data[0];
+        int dtype_idx = (int)trt_model->output_dtype;  // Kernel array index: 0=FP32, 1=FP16, 2=BF16
 
-        // For RGB24/BGR24: convert float32 NCHW to uint8 HWC on GPU (zero-copy)
+        // For RGB24/BGR24: convert NCHW to uint8 HWC on GPU (zero-copy)
         if (hw_frames->sw_format == AV_PIX_FMT_RGB24 || hw_frames->sw_format == AV_PIX_FMT_BGR24) {
             void *args[] = {&trt_model->output_buffer, &cuda_out, &out_height, &out_width, &out_linesize};
-            ret = launch_kernel(trt_model->kernel_nchw_to_hwc, trt_model->stream,
+            ret = launch_kernel(trt_model->kernel_nchw_to_hwc[dtype_idx], trt_model->stream,
                                out_width, out_height, args, ctx);
             if (ret != 0) goto err;
 
@@ -869,7 +1073,7 @@ static void infer_completion_callback(void *args)
             }
             void *args[] = {&trt_model->output_buffer, &cuda_out, &out_height, &out_width, &out_linesize,
                            &r_off, &g_off, &b_off, &a_off};
-            ret = launch_kernel(trt_model->kernel_nchw_to_hwc4, trt_model->stream,
+            ret = launch_kernel(trt_model->kernel_nchw_to_hwc4[dtype_idx], trt_model->stream,
                                out_width, out_height, args, ctx);
             if (ret != 0) goto err;
 
@@ -893,7 +1097,7 @@ static void infer_completion_callback(void *args)
             }
             void *args[] = {&trt_model->output_buffer, &cuda_out, &out_height, &out_width, &out_linesize,
                            &r_off, &g_off, &b_off, &a_off};
-            ret = launch_kernel(trt_model->kernel_nchw_to_hwc4, trt_model->stream,
+            ret = launch_kernel(trt_model->kernel_nchw_to_hwc4[dtype_idx], trt_model->stream,
                                out_width, out_height, args, ctx);
             if (ret != 0) goto err;
 
@@ -912,7 +1116,15 @@ static void infer_completion_callback(void *args)
                av_get_pix_fmt_name(hw_frames->sw_format));
     }
 
-    // Standard CPU path - allocate buffer for output
+    // Standard CPU path - only supports FP32 engines
+    // For FP16/BF16, use CUDA hw frames for zero-copy path
+    if (trt_model->output_dtype != TRT_DT_FLOAT32) {
+        av_log(ctx, AV_LOG_ERROR, "CPU output path only supports FP32 engines, got %s. "
+               "Use hwupload to provide CUDA frames for FP16/BF16 zero-copy.\n",
+               trt_dtype_name(trt_model->output_dtype));
+        goto err;
+    }
+
     output_elements = outputs.dims[0] * outputs.dims[1] * outputs.dims[2] * outputs.dims[3];
     output_data = (float *)av_malloc(output_elements * sizeof(float));
     if (!output_data) {
@@ -1079,48 +1291,103 @@ static DNNModel *dnn_load_model_trt(DnnContext *ctx, DNNFunctionType func_type, 
     // Create TensorRT logger
     trt_model->logger = new TRTLogger(ctx);
 
-    // Create runtime using dynamically loaded function
-    trt_model->runtime = p_createInferRuntime(*trt_model->logger);
-    if (!trt_model->runtime) {
-        av_log(ctx, AV_LOG_ERROR, "Failed to create TensorRT runtime\n");
+    // Check engine cache first (avoid reloading same engine file)
+    trt_model->engine_path = av_strdup(ctx->model_filename);
+    if (!trt_model->engine_path) {
+        av_log(ctx, AV_LOG_ERROR, "Failed to allocate engine path\n");
         goto fail;
     }
-
-    // Load engine from file
     {
-        std::ifstream file(ctx->model_filename, std::ios::binary | std::ios::ate);
-        if (!file.is_open()) {
-            av_log(ctx, AV_LOG_ERROR, "Failed to open engine file: %s\n", ctx->model_filename);
-            goto fail;
+        std::lock_guard<std::mutex> lock(g_engine_cache_mutex);
+        std::string path_key(trt_model->engine_path);
+        av_log(ctx, AV_LOG_DEBUG, "Checking engine cache for: %s (cache size=%zu)\n",
+               trt_model->engine_path, g_engine_cache.size());
+        auto it = g_engine_cache.find(path_key);
+        if (it != g_engine_cache.end()) {
+            // Found in cache - reuse existing engine
+            trt_model->cached_engine = it->second;
+            if (!trt_model->cached_engine->engine || !trt_model->cached_engine->runtime) {
+                av_log(ctx, AV_LOG_ERROR, "BUG: Cached engine has NULL pointers! Removing stale entry.\n");
+                g_engine_cache.erase(it);
+                trt_model->cached_engine = nullptr;
+            } else {
+                trt_model->cached_engine->refcount++;
+                trt_model->engine = trt_model->cached_engine->engine;
+                trt_model->runtime = trt_model->cached_engine->runtime;
+                av_log(ctx, AV_LOG_INFO, "Reusing cached TensorRT engine (refcount=%d, engine=%p)\n",
+                       trt_model->cached_engine->refcount.load(), (void*)trt_model->engine);
+            }
         }
-
-        std::streampos pos = file.tellg();
-        if (pos == std::streampos(-1) || pos <= 0) {
-            av_log(ctx, AV_LOG_ERROR, "Engine file is empty or unreadable: %s\n", ctx->model_filename);
-            goto fail;
-        }
-        size_t size = static_cast<size_t>(pos);
-        file.seekg(0, std::ios::beg);
-
-        std::vector<char> buffer(size);
-        if (!file.read(buffer.data(), size)) {
-            av_log(ctx, AV_LOG_ERROR, "Failed to read engine file\n");
-            goto fail;
-        }
-
-        trt_model->engine = trt_model->runtime->deserializeCudaEngine(buffer.data(), size);
-        if (!trt_model->engine) {
-            av_log(ctx, AV_LOG_ERROR, "Failed to deserialize CUDA engine\n");
-            goto fail;
+        if (!trt_model->cached_engine) {
+            av_log(ctx, AV_LOG_DEBUG, "Engine not in cache, will load from file\n");
         }
     }
 
-    // Create execution context
-    trt_model->context = trt_model->engine->createExecutionContext();
-    if (!trt_model->context) {
-        av_log(ctx, AV_LOG_ERROR, "Failed to create execution context\n");
-        goto fail;
+    // If not in cache, load engine from file
+    if (!trt_model->engine) {
+        // Create runtime using dynamically loaded function
+        trt_model->runtime = p_createInferRuntime(*trt_model->logger);
+        if (!trt_model->runtime) {
+            av_log(ctx, AV_LOG_ERROR, "Failed to create TensorRT runtime\n");
+            goto fail;
+        }
+
+        // Load engine from file
+        {
+            std::ifstream file(ctx->model_filename, std::ios::binary | std::ios::ate);
+            if (!file.is_open()) {
+                av_log(ctx, AV_LOG_ERROR, "Failed to open engine file: %s\n", ctx->model_filename);
+                goto fail;
+            }
+
+            std::streampos pos = file.tellg();
+            if (pos == std::streampos(-1) || pos <= 0) {
+                av_log(ctx, AV_LOG_ERROR, "Engine file is empty or unreadable: %s\n", ctx->model_filename);
+                goto fail;
+            }
+            size_t size = static_cast<size_t>(pos);
+            file.seekg(0, std::ios::beg);
+
+            std::vector<char> buffer(size);
+            if (!file.read(buffer.data(), size)) {
+                av_log(ctx, AV_LOG_ERROR, "Failed to read engine file\n");
+                goto fail;
+            }
+
+            trt_model->engine = trt_model->runtime->deserializeCudaEngine(buffer.data(), size);
+            if (!trt_model->engine) {
+                av_log(ctx, AV_LOG_ERROR, "Failed to deserialize CUDA engine\n");
+                goto fail;
+            }
+        }
+
+        // Add to cache
+        {
+            std::lock_guard<std::mutex> lock(g_engine_cache_mutex);
+            std::string path_key(trt_model->engine_path);
+            // Double-check another thread didn't add it while we were loading
+            auto it = g_engine_cache.find(path_key);
+            if (it == g_engine_cache.end()) {
+                trt_model->cached_engine = new CachedEngine(trt_model->engine, trt_model->runtime);
+                g_engine_cache[path_key] = trt_model->cached_engine;
+                av_log(ctx, AV_LOG_INFO, "Added TensorRT engine to cache\n");
+            } else {
+                // Another thread added it - use theirs, discard ours
+                delete trt_model->engine;
+                delete trt_model->runtime;
+                trt_model->cached_engine = it->second;
+                trt_model->cached_engine->refcount++;
+                trt_model->engine = trt_model->cached_engine->engine;
+                trt_model->runtime = trt_model->cached_engine->runtime;
+                av_log(ctx, AV_LOG_INFO, "Using engine added by another thread (refcount=%d)\n",
+                       trt_model->cached_engine->refcount.load());
+            }
+        }
     }
+
+    // NOTE: Execution context is created lazily on first inference (saves ~720MB for probe instances)
+    // FFmpeg creates two filter instances: one for probing (never runs inference) and one for execution
+    trt_model->context = nullptr;
 
     // Create CUDA stream using Driver API
     err = p_cuStreamCreate(&trt_model->stream, 0);
@@ -1150,14 +1417,32 @@ static DNNModel *dnn_load_model_trt(DnnContext *ctx, DNNFunctionType func_type, 
             if (mode == nvinfer1::TensorIOMode::kINPUT && !trt_model->input_name) {
                 trt_model->input_name = av_strdup(name);
                 trt_model->input_dims = trt_model->engine->getTensorShape(name);
+                trt_model->input_dtype = nvinfer_to_trt_dtype(trt_model->engine->getTensorDataType(name));
             } else if (mode == nvinfer1::TensorIOMode::kOUTPUT && !trt_model->output_name) {
                 trt_model->output_name = av_strdup(name);
                 trt_model->output_dims = trt_model->engine->getTensorShape(name);
+                trt_model->output_dtype = nvinfer_to_trt_dtype(trt_model->engine->getTensorDataType(name));
             }
         }
 
         if (!trt_model->input_name || !trt_model->output_name) {
             av_log(ctx, AV_LOG_ERROR, "Could not find input/output tensors\n");
+            goto fail;
+        }
+
+        // Validate dtypes are supported
+        if (trt_model->input_dtype == TRT_DT_UNKNOWN) {
+            av_log(ctx, AV_LOG_ERROR, "Unsupported input tensor data type\n");
+            goto fail;
+        }
+        if (trt_model->output_dtype == TRT_DT_UNKNOWN) {
+            av_log(ctx, AV_LOG_ERROR, "Unsupported output tensor data type\n");
+            goto fail;
+        }
+        // For now, we only support FP32/FP16/BF16 for zero-copy kernels
+        if (trt_model->input_dtype > TRT_DT_BFLOAT16 || trt_model->output_dtype > TRT_DT_BFLOAT16) {
+            av_log(ctx, AV_LOG_ERROR, "Only FP32/FP16/BF16 tensors supported for zero-copy, got input=%s output=%s\n",
+                   trt_dtype_name(trt_model->input_dtype), trt_dtype_name(trt_model->output_dtype));
             goto fail;
         }
 
@@ -1187,69 +1472,45 @@ static DNNModel *dnn_load_model_trt(DnnContext *ctx, DNNFunctionType func_type, 
             }
         }
 
-        // Log dimensions
+        // Log dimensions and dtypes
         av_log(ctx, AV_LOG_INFO, "TensorRT engine loaded:\n");
-        av_log(ctx, AV_LOG_INFO, "  Input '%s': %ldx%ldx%ldx%ld\n",
+        av_log(ctx, AV_LOG_INFO, "  Input '%s': %ldx%ldx%ldx%ld (%s)\n",
                trt_model->input_name,
                (long)trt_model->input_dims.d[0], (long)trt_model->input_dims.d[1],
-               (long)trt_model->input_dims.d[2], (long)trt_model->input_dims.d[3]);
-        av_log(ctx, AV_LOG_INFO, "  Output '%s': %ldx%ldx%ldx%ld\n",
+               (long)trt_model->input_dims.d[2], (long)trt_model->input_dims.d[3],
+               trt_dtype_name(trt_model->input_dtype));
+        av_log(ctx, AV_LOG_INFO, "  Output '%s': %ldx%ldx%ldx%ld (%s)\n",
                trt_model->output_name,
                (long)trt_model->output_dims.d[0], (long)trt_model->output_dims.d[1],
-               (long)trt_model->output_dims.d[2], (long)trt_model->output_dims.d[3]);
+               (long)trt_model->output_dims.d[2], (long)trt_model->output_dims.d[3],
+               trt_dtype_name(trt_model->output_dtype));
 
-        // Allocate GPU buffers using Driver API
-        // Use overflow-safe multiplication for buffer size calculation
+        // Calculate buffer sizes (allocation deferred to first inference via ensure_execution_context)
         {
             int64_t in_elems = (int64_t)trt_model->input_dims.d[0] * trt_model->input_dims.d[1] *
                                trt_model->input_dims.d[2] * trt_model->input_dims.d[3];
             int64_t out_elems = (int64_t)trt_model->output_dims.d[0] * trt_model->output_dims.d[1] *
                                 trt_model->output_dims.d[2] * trt_model->output_dims.d[3];
 
+            size_t in_elem_size = trt_dtype_size(trt_model->input_dtype);
+            size_t out_elem_size = trt_dtype_size(trt_model->output_dtype);
+
             // Check for overflow (max reasonable GPU buffer ~16GB)
-            const int64_t max_elements = (int64_t)4 * 1024 * 1024 * 1024 / sizeof(float);
-            if (in_elems > max_elements || out_elems > max_elements) {
-                av_log(ctx, AV_LOG_ERROR, "Tensor size exceeds maximum supported (%lld elements)\n",
-                       (long long)max_elements);
+            const int64_t max_bytes = (int64_t)16 * 1024 * 1024 * 1024;
+            if (in_elems * (int64_t)in_elem_size > max_bytes || out_elems * (int64_t)out_elem_size > max_bytes) {
+                av_log(ctx, AV_LOG_ERROR, "Tensor size exceeds maximum supported (16GB)\n");
                 goto fail;
             }
 
-            trt_model->input_size = (size_t)in_elems * sizeof(float);
-            trt_model->output_size = (size_t)out_elems * sizeof(float);
+            trt_model->input_size = (size_t)in_elems * in_elem_size;
+            trt_model->output_size = (size_t)out_elems * out_elem_size;
+
+            av_log(ctx, AV_LOG_INFO, "  Buffer sizes (deferred): input=%zuMB output=%zuMB\n",
+                   trt_model->input_size / (1024 * 1024), trt_model->output_size / (1024 * 1024));
         }
 
-        // Allocate GPU buffers using CUDA Runtime API (cudaMalloc)
-        // Runtime API works because TensorRT internally uses Runtime API
-        // Driver API (cuMemAlloc) fails with "invalid device context" on TensorRT 10 + CUDA 13
-        if (p_cudaMalloc) {
-            void *input_ptr = NULL, *output_ptr = NULL;
-            cudaError_t cuda_err = p_cudaMalloc(&input_ptr, trt_model->input_size);
-            if (cuda_err != cudaSuccess) {
-                av_log(ctx, AV_LOG_ERROR, "cudaMalloc failed for input buffer: %d\n", cuda_err);
-                goto fail;
-            }
-            trt_model->input_buffer = (CUdeviceptr)input_ptr;
-
-            cuda_err = p_cudaMalloc(&output_ptr, trt_model->output_size);
-            if (cuda_err != cudaSuccess) {
-                av_log(ctx, AV_LOG_ERROR, "cudaMalloc failed for output buffer: %d\n", cuda_err);
-                goto fail;
-            }
-            trt_model->output_buffer = (CUdeviceptr)output_ptr;
-        } else {
-            av_log(ctx, AV_LOG_ERROR, "CUDA runtime API not available for buffer allocation\n");
-            goto fail;
-        }
-
-        // Set tensor addresses once (buffers are persistent, no need to set per-frame)
-        if (!trt_model->context->setTensorAddress(trt_model->input_name, (void*)trt_model->input_buffer)) {
-            av_log(ctx, AV_LOG_ERROR, "Failed to set input tensor address\n");
-            goto fail;
-        }
-        if (!trt_model->context->setTensorAddress(trt_model->output_name, (void*)trt_model->output_buffer)) {
-            av_log(ctx, AV_LOG_ERROR, "Failed to set output tensor address\n");
-            goto fail;
-        }
+        // NOTE: GPU buffers and execution context are allocated lazily on first inference
+        // This saves ~720MB+ for FFmpeg's probe filter instance that never runs inference
     }
 
     // Initialize queues

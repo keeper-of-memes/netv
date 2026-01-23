@@ -6,7 +6,12 @@
  * CUDA kernels for DNN backend format conversion.
  * Compiled to PTX at build time, loaded dynamically at runtime.
  * No cudart dependency - uses CUDA Driver API via FFmpeg's dynlink.
+ *
+ * Supports FP32, FP16, and BF16 tensor formats.
  */
+
+#include <cuda_fp16.h>
+#include <cuda_bf16.h>
 
 extern "C" {
 
@@ -134,6 +139,232 @@ __global__ void nchw_float32_to_hwc4_uint8_kernel(
     row[x * 4 + g_offset] = float_to_uint8_safe(g);
     row[x * 4 + b_offset] = float_to_uint8_safe(b);
     row[x * 4 + a_offset] = 255;  // Alpha = opaque
+}
+
+// ============================================================================
+// FP16 (half precision) variants
+// ============================================================================
+
+// Kernel: HWC uint8 [0,255] -> NCHW float16 [0,1]
+__global__ void hwc_uint8_to_nchw_float16_kernel(
+    const unsigned char* __restrict__ input,
+    __half* __restrict__ output,
+    int height, int width, int input_linesize)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height) return;
+
+    const unsigned char* row = input + y * input_linesize;
+    unsigned char r = row[x * 3 + 0];
+    unsigned char g = row[x * 3 + 1];
+    unsigned char b = row[x * 3 + 2];
+
+    int hw = height * width;
+    output[0 * hw + y * width + x] = __float2half(r / 255.0f);
+    output[1 * hw + y * width + x] = __float2half(g / 255.0f);
+    output[2 * hw + y * width + x] = __float2half(b / 255.0f);
+}
+
+// Helper: Convert half to uint8 safely
+__device__ __forceinline__ unsigned char half_to_uint8_safe(__half val) {
+    float f = __half2float(val);
+    if (!isfinite(f)) return 0;
+    f = f * 255.0f + 0.5f;
+    f = fminf(fmaxf(f, 0.0f), 255.0f);
+    return (unsigned char)f;
+}
+
+// Kernel: NCHW float16 [0,1] -> HWC uint8 [0,255]
+__global__ void nchw_float16_to_hwc_uint8_kernel(
+    const __half* __restrict__ input,
+    unsigned char* __restrict__ output,
+    int height, int width, int output_linesize)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height) return;
+
+    int hw = height * width;
+    __half r = input[0 * hw + y * width + x];
+    __half g = input[1 * hw + y * width + x];
+    __half b = input[2 * hw + y * width + x];
+
+    unsigned char* row = output + y * output_linesize;
+    row[x * 3 + 0] = half_to_uint8_safe(r);
+    row[x * 3 + 1] = half_to_uint8_safe(g);
+    row[x * 3 + 2] = half_to_uint8_safe(b);
+}
+
+// Kernel: 4-channel HWC uint8 -> NCHW float16
+__global__ void hwc4_uint8_to_nchw_float16_kernel(
+    const unsigned char* __restrict__ input,
+    __half* __restrict__ output,
+    int height, int width, int input_linesize,
+    int r_offset, int g_offset, int b_offset)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height) return;
+
+    r_offset = max(0, min(3, r_offset));
+    g_offset = max(0, min(3, g_offset));
+    b_offset = max(0, min(3, b_offset));
+
+    const unsigned char* row = input + y * input_linesize;
+    unsigned char r = row[x * 4 + r_offset];
+    unsigned char g = row[x * 4 + g_offset];
+    unsigned char b = row[x * 4 + b_offset];
+
+    int hw = height * width;
+    output[0 * hw + y * width + x] = __float2half(r / 255.0f);
+    output[1 * hw + y * width + x] = __float2half(g / 255.0f);
+    output[2 * hw + y * width + x] = __float2half(b / 255.0f);
+}
+
+// Kernel: NCHW float16 -> 4-channel HWC uint8
+__global__ void nchw_float16_to_hwc4_uint8_kernel(
+    const __half* __restrict__ input,
+    unsigned char* __restrict__ output,
+    int height, int width, int output_linesize,
+    int r_offset, int g_offset, int b_offset, int a_offset)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height) return;
+
+    r_offset = max(0, min(3, r_offset));
+    g_offset = max(0, min(3, g_offset));
+    b_offset = max(0, min(3, b_offset));
+    a_offset = max(0, min(3, a_offset));
+
+    int hw = height * width;
+    __half r = input[0 * hw + y * width + x];
+    __half g = input[1 * hw + y * width + x];
+    __half b = input[2 * hw + y * width + x];
+
+    unsigned char* row = output + y * output_linesize;
+    row[x * 4 + r_offset] = half_to_uint8_safe(r);
+    row[x * 4 + g_offset] = half_to_uint8_safe(g);
+    row[x * 4 + b_offset] = half_to_uint8_safe(b);
+    row[x * 4 + a_offset] = 255;
+}
+
+// ============================================================================
+// BF16 (bfloat16) variants
+// ============================================================================
+
+// Kernel: HWC uint8 [0,255] -> NCHW bfloat16 [0,1]
+__global__ void hwc_uint8_to_nchw_bfloat16_kernel(
+    const unsigned char* __restrict__ input,
+    __nv_bfloat16* __restrict__ output,
+    int height, int width, int input_linesize)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height) return;
+
+    const unsigned char* row = input + y * input_linesize;
+    unsigned char r = row[x * 3 + 0];
+    unsigned char g = row[x * 3 + 1];
+    unsigned char b = row[x * 3 + 2];
+
+    int hw = height * width;
+    output[0 * hw + y * width + x] = __float2bfloat16(r / 255.0f);
+    output[1 * hw + y * width + x] = __float2bfloat16(g / 255.0f);
+    output[2 * hw + y * width + x] = __float2bfloat16(b / 255.0f);
+}
+
+// Helper: Convert bfloat16 to uint8 safely
+__device__ __forceinline__ unsigned char bfloat16_to_uint8_safe(__nv_bfloat16 val) {
+    float f = __bfloat162float(val);
+    if (!isfinite(f)) return 0;
+    f = f * 255.0f + 0.5f;
+    f = fminf(fmaxf(f, 0.0f), 255.0f);
+    return (unsigned char)f;
+}
+
+// Kernel: NCHW bfloat16 [0,1] -> HWC uint8 [0,255]
+__global__ void nchw_bfloat16_to_hwc_uint8_kernel(
+    const __nv_bfloat16* __restrict__ input,
+    unsigned char* __restrict__ output,
+    int height, int width, int output_linesize)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height) return;
+
+    int hw = height * width;
+    __nv_bfloat16 r = input[0 * hw + y * width + x];
+    __nv_bfloat16 g = input[1 * hw + y * width + x];
+    __nv_bfloat16 b = input[2 * hw + y * width + x];
+
+    unsigned char* row = output + y * output_linesize;
+    row[x * 3 + 0] = bfloat16_to_uint8_safe(r);
+    row[x * 3 + 1] = bfloat16_to_uint8_safe(g);
+    row[x * 3 + 2] = bfloat16_to_uint8_safe(b);
+}
+
+// Kernel: 4-channel HWC uint8 -> NCHW bfloat16
+__global__ void hwc4_uint8_to_nchw_bfloat16_kernel(
+    const unsigned char* __restrict__ input,
+    __nv_bfloat16* __restrict__ output,
+    int height, int width, int input_linesize,
+    int r_offset, int g_offset, int b_offset)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height) return;
+
+    r_offset = max(0, min(3, r_offset));
+    g_offset = max(0, min(3, g_offset));
+    b_offset = max(0, min(3, b_offset));
+
+    const unsigned char* row = input + y * input_linesize;
+    unsigned char r = row[x * 4 + r_offset];
+    unsigned char g = row[x * 4 + g_offset];
+    unsigned char b = row[x * 4 + b_offset];
+
+    int hw = height * width;
+    output[0 * hw + y * width + x] = __float2bfloat16(r / 255.0f);
+    output[1 * hw + y * width + x] = __float2bfloat16(g / 255.0f);
+    output[2 * hw + y * width + x] = __float2bfloat16(b / 255.0f);
+}
+
+// Kernel: NCHW bfloat16 -> 4-channel HWC uint8
+__global__ void nchw_bfloat16_to_hwc4_uint8_kernel(
+    const __nv_bfloat16* __restrict__ input,
+    unsigned char* __restrict__ output,
+    int height, int width, int output_linesize,
+    int r_offset, int g_offset, int b_offset, int a_offset)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height) return;
+
+    r_offset = max(0, min(3, r_offset));
+    g_offset = max(0, min(3, g_offset));
+    b_offset = max(0, min(3, b_offset));
+    a_offset = max(0, min(3, a_offset));
+
+    int hw = height * width;
+    __nv_bfloat16 r = input[0 * hw + y * width + x];
+    __nv_bfloat16 g = input[1 * hw + y * width + x];
+    __nv_bfloat16 b = input[2 * hw + y * width + x];
+
+    unsigned char* row = output + y * output_linesize;
+    row[x * 4 + r_offset] = bfloat16_to_uint8_safe(r);
+    row[x * 4 + g_offset] = bfloat16_to_uint8_safe(g);
+    row[x * 4 + b_offset] = bfloat16_to_uint8_safe(b);
+    row[x * 4 + a_offset] = 255;
 }
 
 }  // extern "C"
