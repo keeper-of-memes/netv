@@ -266,7 +266,9 @@ static int config_output(AVFilterLink *outlink)
         return 0;
     }
 
-    prepare_uv_scale(outlink);
+    result = prepare_uv_scale(outlink);
+    if (result < 0)
+        return result;
 
     return 0;
 }
@@ -321,8 +323,14 @@ static int flush_frame(AVFilterLink *outlink, int64_t pts, int64_t *out_pts)
         async_state = ff_dnn_get_result(&ctx->dnnctx, &in_frame, &out_frame);
         if (out_frame) {
             int64_t frame_pts = out_frame->pts;  // Save before ff_filter_frame may free
-            if (in_frame && isPlanarYUV(in_frame->format))
-                copy_uv_planes(ctx, out_frame, in_frame);
+            if (in_frame && isPlanarYUV(in_frame->format)) {
+                ret = copy_uv_planes(ctx, out_frame, in_frame);
+                if (ret < 0) {
+                    av_frame_free(&in_frame);
+                    av_frame_free(&out_frame);
+                    return ret;
+                }
+            }
             av_frame_free(&in_frame);
             ret = ff_filter_frame(outlink, out_frame);
             if (ret < 0)
@@ -395,8 +403,14 @@ static int activate(AVFilterContext *filter_ctx)
         AVFrame *out_frame = NULL;
         async_state = ff_dnn_get_result(&ctx->dnnctx, &in_frame, &out_frame);
         if (out_frame) {
-            if (in_frame && isPlanarYUV(in_frame->format))
-                copy_uv_planes(ctx, out_frame, in_frame);
+            if (in_frame && isPlanarYUV(in_frame->format)) {
+                ret = copy_uv_planes(ctx, out_frame, in_frame);
+                if (ret < 0) {
+                    av_frame_free(&in_frame);
+                    av_frame_free(&out_frame);
+                    return ret;
+                }
+            }
             av_frame_free(&in_frame);
             ret = ff_filter_frame(outlink, out_frame);
             if (ret < 0)

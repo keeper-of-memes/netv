@@ -89,6 +89,11 @@ __global__ void hwc4_uint8_to_nchw_float32_kernel(
 
     if (x >= width || y >= height) return;
 
+    // Clamp offsets to valid range [0, 3]
+    r_offset = max(0, min(3, r_offset));
+    g_offset = max(0, min(3, g_offset));
+    b_offset = max(0, min(3, b_offset));
+
     const unsigned char* row = input + y * input_linesize;
     unsigned char r = row[x * 4 + r_offset];
     unsigned char g = row[x * 4 + g_offset];
@@ -111,6 +116,12 @@ __global__ void nchw_float32_to_hwc4_uint8_kernel(
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
     if (x >= width || y >= height) return;
+
+    // Clamp offsets to valid range [0, 3]
+    r_offset = max(0, min(3, r_offset));
+    g_offset = max(0, min(3, g_offset));
+    b_offset = max(0, min(3, b_offset));
+    a_offset = max(0, min(3, a_offset));
 
     int hw = height * width;
     float r = input[0 * hw + y * width + x];

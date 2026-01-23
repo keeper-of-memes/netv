@@ -711,6 +711,9 @@ static int get_output_th(DNNModel *model, const char *input_name, int input_widt
     if (!request) {
         av_log(ctx, AV_LOG_ERROR, "unable to get infer request.\n");
         ret = AVERROR(EINVAL);
+        // Clean up lltask that was pushed by extract_lltask_from_task
+        LastLevelTaskItem *lltask = (LastLevelTaskItem *)ff_queue_pop_back(th_model->lltask_queue);
+        av_freep(&lltask);
         goto err;
     }
 
@@ -763,9 +766,10 @@ static DNNModel *dnn_load_model_th(DnnContext *ctx, DNNFunctionType func_type, A
         // Load CUDA kernels - required for libtorch CUDA ops
         // Thread-safe initialization using call_once
         static std::once_flag cuda_lib_once;
+        static void *cuda_lib_handle = NULL;
         std::call_once(cuda_lib_once, [ctx]() {
-            void *cuda_handle = dlopen("libtorch_cuda.so", RTLD_NOW | RTLD_GLOBAL);
-            if (cuda_handle) {
+            cuda_lib_handle = dlopen("libtorch_cuda.so", RTLD_NOW | RTLD_GLOBAL);
+            if (cuda_lib_handle) {
                 av_log(ctx, AV_LOG_DEBUG, "libtorch_cuda.so loaded\n");
             } else {
                 av_log(ctx, AV_LOG_WARNING, "Failed to load libtorch_cuda.so: %s\n", dlerror());
@@ -781,9 +785,10 @@ static DNNModel *dnn_load_model_th(DnnContext *ctx, DNNFunctionType func_type, A
         // Load TensorRT runtime if available (enables TRT-compiled models)
         // Thread-safe initialization using call_once
         static std::once_flag trt_once;
+        static void *trt_lib_handle = NULL;
         std::call_once(trt_once, [ctx]() {
-            void *trt_handle = dlopen("libtorchtrt_runtime.so", RTLD_NOW | RTLD_GLOBAL);
-            if (trt_handle) {
+            trt_lib_handle = dlopen("libtorchtrt_runtime.so", RTLD_NOW | RTLD_GLOBAL);
+            if (trt_lib_handle) {
                 av_log(ctx, AV_LOG_INFO, "TensorRT runtime loaded\n");
             }
         });
@@ -796,6 +801,9 @@ static DNNModel *dnn_load_model_th(DnnContext *ctx, DNNFunctionType func_type, A
                    at::cuda::device_count());
         }
     } catch (const c10::Error& e) {
+        av_log(ctx, AV_LOG_ERROR, "Failed to load torch model: %s\n", e.what());
+        goto fail;
+    } catch (const std::exception& e) {
         av_log(ctx, AV_LOG_ERROR, "Failed to load torch model: %s\n", e.what());
         goto fail;
     }
@@ -839,10 +847,15 @@ static DNNModel *dnn_load_model_th(DnnContext *ctx, DNNFunctionType func_type, A
         goto fail;
     }
 
-    th_model->mutex = new std::mutex();
-    th_model->cond = new std::condition_variable();
-    th_model->worker_stop = false;
-    th_model->worker_thread = new std::thread(th_worker_thread, th_model);
+    try {
+        th_model->mutex = new std::mutex();
+        th_model->cond = new std::condition_variable();
+        th_model->worker_stop = false;
+        th_model->worker_thread = new std::thread(th_worker_thread, th_model);
+    } catch (const std::exception& e) {
+        av_log(ctx, AV_LOG_ERROR, "Failed to create worker thread: %s\n", e.what());
+        goto fail;
+    }
 
     model->get_input = &get_input_th;
     model->get_output = &get_output_th;
@@ -896,12 +909,18 @@ static int dnn_execute_model_th(const DNNModel *model, DNNExecBaseParams *exec_p
     ret = extract_lltask_from_task(task, th_model->lltask_queue);
     if (ret != 0) {
         av_log(ctx, AV_LOG_ERROR, "unable to extract last level task from task.\n");
+        ff_queue_pop_front(th_model->task_queue);
+        av_freep(&task);
         return ret;
     }
 
     request = (THRequestItem *)ff_safe_queue_pop_front(th_model->request_queue);
     if (!request) {
         av_log(ctx, AV_LOG_ERROR, "unable to get infer request.\n");
+        LastLevelTaskItem *lltask = (LastLevelTaskItem *)ff_queue_pop_back(th_model->lltask_queue);
+        av_freep(&lltask);
+        ff_queue_pop_front(th_model->task_queue);
+        av_freep(&task);
         return AVERROR(EINVAL);
     }
 

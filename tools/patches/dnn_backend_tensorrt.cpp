@@ -309,6 +309,11 @@ static int load_libs(void *log_ctx) {
         av_log(log_ctx, AV_LOG_ERROR, "Failed to find createInferRuntime in TensorRT library\n");
         dlclose(libnvinfer_handle);
         libnvinfer_handle = NULL;
+        dlclose(cuda_rt_handle);
+        cuda_rt_handle = NULL;
+        dlclose(libcuda_handle);
+        libcuda_handle = NULL;
+        cuda_loaded = 0;
         libs_load_attempted.store(1, std::memory_order_release);
         return AVERROR(ENOSYS);
     }
