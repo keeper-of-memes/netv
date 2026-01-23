@@ -345,6 +345,21 @@ def build_engine(
 
     print(f"  Engine saved: {engine_path} ({os.path.getsize(engine_path) / 1024 / 1024:.1f} MB)")
 
+    # Verify the built engine has correct I/O types
+    runtime = trt.Runtime(logger)
+    engine = runtime.deserialize_cuda_engine(serialized_engine)
+    print("  Verifying engine I/O:")
+    for i in range(engine.num_io_tensors):
+        name = engine.get_tensor_name(i)
+        dtype = engine.get_tensor_dtype(name)
+        mode = engine.get_tensor_mode(name)
+        dtype_str = "FP16" if dtype == trt.float16 else "FP32" if dtype == trt.float32 else str(dtype)
+        print(f"    {name}: {dtype_str} ({mode})")
+        if fp16_io and dtype != trt.float16:
+            print(f"  WARNING: {name} is {dtype_str} but FP16 I/O was requested!")
+    del engine
+    del runtime
+
 
 def height_to_shape(h, aspect=16 / 9):
     """Convert height to (width, height) assuming aspect ratio."""
