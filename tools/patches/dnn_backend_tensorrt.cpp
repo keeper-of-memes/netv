@@ -286,6 +286,11 @@ static int load_libs(void *log_ctx) {
                "TensorRT not available: %s\n"
                "Install TensorRT or run with --gpus all to use nvidia-container-toolkit\n",
                dlerror());
+        dlclose(cuda_rt_handle);
+        cuda_rt_handle = NULL;
+        dlclose(libcuda_handle);
+        libcuda_handle = NULL;
+        cuda_loaded = 0;
         libs_load_attempted.store(1, std::memory_order_release);
         return AVERROR(ENOSYS);
     }
@@ -980,6 +985,7 @@ static int execute_model_trt(TRTRequestItem *request, Queue *lltask_queue)
 
 err:
     trt_free_request(request->infer_request);
+    av_freep(&request->lltask);  // Free lltask that was popped from queue
     if (!trt_model || ff_safe_queue_push_back(trt_model->request_queue, request) < 0) {
         destroy_request_item(&request);
     }
@@ -1299,6 +1305,11 @@ static int dnn_execute_model_trt(const DNNModel *model, DNNExecBaseParams *exec_
     request = (TRTRequestItem *)ff_safe_queue_pop_front(trt_model->request_queue);
     if (!request) {
         av_log(ctx, AV_LOG_ERROR, "unable to get infer request.\n");
+        // Clean up: remove lltask and task we just added
+        LastLevelTaskItem *lltask = (LastLevelTaskItem *)ff_queue_pop_back(trt_model->lltask_queue);
+        av_freep(&lltask);
+        ff_queue_pop_back(trt_model->task_queue);
+        av_freep(&task);
         return AVERROR(EINVAL);
     }
 

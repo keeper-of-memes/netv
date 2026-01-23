@@ -175,7 +175,8 @@ static int config_input(AVFilterLink *inlink)
 static av_always_inline int isPlanarYUV(enum AVPixelFormat pix_fmt)
 {
     const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(pix_fmt);
-    av_assert0(desc);
+    if (!desc)
+        return 0;
     return !(desc->flags & AV_PIX_FMT_FLAG_RGB) && desc->nb_components == 3;
 }
 
@@ -192,6 +193,10 @@ static int prepare_uv_scale(AVFilterLink *outlink)
                 ctx->sws_uv_scale = sws_getContext(inlink->w >> 1, inlink->h >> 1, AV_PIX_FMT_YA8,
                                                    outlink->w >> 1, outlink->h >> 1, AV_PIX_FMT_YA8,
                                                    SWS_BICUBIC, NULL, NULL, NULL);
+                if (!ctx->sws_uv_scale) {
+                    av_log(context, AV_LOG_ERROR, "Failed to create UV scale context for NV12\n");
+                    return AVERROR(ENOMEM);
+                }
                 ctx->sws_uv_height = inlink->h >> 1;
             } else {
                 const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(fmt);
@@ -202,6 +207,10 @@ static int prepare_uv_scale(AVFilterLink *outlink)
                 ctx->sws_uv_scale = sws_getContext(sws_src_w, sws_src_h, AV_PIX_FMT_GRAY8,
                                                    sws_dst_w, sws_dst_h, AV_PIX_FMT_GRAY8,
                                                    SWS_BICUBIC, NULL, NULL, NULL);
+                if (!ctx->sws_uv_scale) {
+                    av_log(context, AV_LOG_ERROR, "Failed to create UV scale context\n");
+                    return AVERROR(ENOMEM);
+                }
                 ctx->sws_uv_height = sws_src_h;
             }
         }
@@ -270,6 +279,8 @@ static int copy_uv_planes(DnnProcessingContext *ctx, AVFrame *out, const AVFrame
     if (!ctx->sws_uv_scale) {
         av_assert0(in->height == out->height && in->width == out->width);
         desc = av_pix_fmt_desc_get(in->format);
+        if (!desc)
+            return AVERROR(EINVAL);
         uv_height = AV_CEIL_RSHIFT(in->height, desc->log2_chroma_h);
         for (int i = 1; i < 3; ++i) {
             int bytewidth = av_image_get_linesize(in->format, in->width, i);
