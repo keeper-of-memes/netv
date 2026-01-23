@@ -543,6 +543,11 @@ static void dnn_free_model_trt(DNNModel **model)
 
     trt_model = (TRTModel *)(*model);
 
+    // Synchronize stream before cleanup to ensure all GPU operations complete
+    if (trt_model->stream && p_cuStreamSynchronize) {
+        p_cuStreamSynchronize(trt_model->stream);
+    }
+
     // Free CUDA resources (using Runtime API - must match cudaMalloc allocation)
     if (trt_model->input_buffer && p_cudaFree) {
         p_cudaFree((void*)trt_model->input_buffer);
@@ -842,10 +847,12 @@ static void infer_completion_callback(void *args)
             void *args[] = {&trt_model->output_buffer, &cuda_out, &out_height, &out_width, &out_linesize};
             ret = launch_kernel(trt_model->kernel_nchw_to_hwc, trt_model->stream,
                                out_width, out_height, args, ctx);
-
-            p_cuStreamSynchronize(trt_model->stream);
-
             if (ret != 0) goto err;
+
+            if (p_cuStreamSynchronize(trt_model->stream) != CUDA_SUCCESS) {
+                av_log(ctx, AV_LOG_ERROR, "CUDA stream sync failed\n");
+                goto err;
+            }
 
             task->out_frame->width = out_width;
             task->out_frame->height = out_height;
@@ -864,10 +871,12 @@ static void infer_completion_callback(void *args)
                            &r_off, &g_off, &b_off, &a_off};
             ret = launch_kernel(trt_model->kernel_nchw_to_hwc4, trt_model->stream,
                                out_width, out_height, args, ctx);
-
-            p_cuStreamSynchronize(trt_model->stream);
-
             if (ret != 0) goto err;
+
+            if (p_cuStreamSynchronize(trt_model->stream) != CUDA_SUCCESS) {
+                av_log(ctx, AV_LOG_ERROR, "CUDA stream sync failed\n");
+                goto err;
+            }
 
             task->out_frame->width = out_width;
             task->out_frame->height = out_height;
@@ -886,10 +895,12 @@ static void infer_completion_callback(void *args)
                            &r_off, &g_off, &b_off, &a_off};
             ret = launch_kernel(trt_model->kernel_nchw_to_hwc4, trt_model->stream,
                                out_width, out_height, args, ctx);
-
-            p_cuStreamSynchronize(trt_model->stream);
-
             if (ret != 0) goto err;
+
+            if (p_cuStreamSynchronize(trt_model->stream) != CUDA_SUCCESS) {
+                av_log(ctx, AV_LOG_ERROR, "CUDA stream sync failed\n");
+                goto err;
+            }
 
             task->out_frame->width = out_width;
             task->out_frame->height = out_height;

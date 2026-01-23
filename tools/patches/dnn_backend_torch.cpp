@@ -398,11 +398,6 @@ static int th_start_inference(void *args)
     th_model = (THModel *)task->model;
     ctx = th_model->ctx;
 
-    if (ctx->torch_option.optimize)
-        torch::jit::setGraphExecutorOptimize(true);
-    else
-        torch::jit::setGraphExecutorOptimize(false);
-
     if (!infer_request->input_tensor || !infer_request->output) {
         av_log(ctx, AV_LOG_ERROR, "input or output tensor is NULL\n");
         return DNN_GENERIC_ERROR;
@@ -824,7 +819,10 @@ static DNNModel *dnn_load_model_th(DnnContext *ctx, DNNFunctionType func_type, A
         });
         (*th_model->jit_model) = torch::jit::load(ctx->model_filename);
         th_model->jit_model->to(device);
-        av_log(ctx, AV_LOG_INFO, "Model loaded to device: %s\n", device_name);
+        // Set JIT optimization once at model load time (thread-safe)
+        torch::jit::setGraphExecutorOptimize(ctx->torch_option.optimize ? true : false);
+        av_log(ctx, AV_LOG_INFO, "Model loaded to device: %s (JIT optimize=%d)\n",
+               device_name, ctx->torch_option.optimize);
         if (device.is_cuda()) {
             av_log(ctx, AV_LOG_INFO, "CUDA available: %s, device count: %d\n",
                    at::cuda::is_available() ? "yes" : "no",
@@ -939,7 +937,7 @@ static int dnn_execute_model_th(const DNNModel *model, DNNExecBaseParams *exec_p
     ret = extract_lltask_from_task(task, th_model->lltask_queue);
     if (ret != 0) {
         av_log(ctx, AV_LOG_ERROR, "unable to extract last level task from task.\n");
-        ff_queue_pop_front(th_model->task_queue);
+        ff_queue_pop_back(th_model->task_queue);
         av_freep(&task);
         return ret;
     }
@@ -949,7 +947,7 @@ static int dnn_execute_model_th(const DNNModel *model, DNNExecBaseParams *exec_p
         av_log(ctx, AV_LOG_ERROR, "unable to get infer request.\n");
         LastLevelTaskItem *lltask = (LastLevelTaskItem *)ff_queue_pop_back(th_model->lltask_queue);
         av_freep(&lltask);
-        ff_queue_pop_front(th_model->task_queue);
+        ff_queue_pop_back(th_model->task_queue);
         av_freep(&task);
         return AVERROR(EINVAL);
     }

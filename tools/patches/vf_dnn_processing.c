@@ -200,10 +200,15 @@ static int prepare_uv_scale(AVFilterLink *outlink)
                 ctx->sws_uv_height = inlink->h >> 1;
             } else {
                 const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(fmt);
-                int sws_src_h = AV_CEIL_RSHIFT(inlink->h, desc->log2_chroma_h);
-                int sws_src_w = AV_CEIL_RSHIFT(inlink->w, desc->log2_chroma_w);
-                int sws_dst_h = AV_CEIL_RSHIFT(outlink->h, desc->log2_chroma_h);
-                int sws_dst_w = AV_CEIL_RSHIFT(outlink->w, desc->log2_chroma_w);
+                int sws_src_h, sws_src_w, sws_dst_h, sws_dst_w;
+                if (!desc) {
+                    av_log(context, AV_LOG_ERROR, "Unknown pixel format %d\n", fmt);
+                    return AVERROR(EINVAL);
+                }
+                sws_src_h = AV_CEIL_RSHIFT(inlink->h, desc->log2_chroma_h);
+                sws_src_w = AV_CEIL_RSHIFT(inlink->w, desc->log2_chroma_w);
+                sws_dst_h = AV_CEIL_RSHIFT(outlink->h, desc->log2_chroma_h);
+                sws_dst_w = AV_CEIL_RSHIFT(outlink->w, desc->log2_chroma_w);
                 ctx->sws_uv_scale = sws_getContext(sws_src_w, sws_src_h, AV_PIX_FMT_GRAY8,
                                                    sws_dst_w, sws_dst_h, AV_PIX_FMT_GRAY8,
                                                    SWS_BICUBIC, NULL, NULL, NULL);
