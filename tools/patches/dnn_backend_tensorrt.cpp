@@ -972,9 +972,14 @@ static void infer_completion_callback(void *args)
 
     av_freep(&output_data);
     task->inference_done++;
+    goto done;
+
+err:
+    // Increment inference_done even on error so task completion tracking works
+    // The caller can detect failure through other means (e.g., frame validation)
+    task->inference_done++;
 
 done:
-err:
     av_freep(&request->lltask);
     if (ff_safe_queue_push_back(trt_model->request_queue, request) < 0) {
         destroy_request_item(&request);

@@ -604,10 +604,14 @@ static void infer_completion_callback(void *args) {
         goto err;
     }
     task->inference_done++;
+    goto done;
     } catch (const std::exception& e) {
         av_log(th_model->ctx, AV_LOG_ERROR, "Torch exception in completion callback: %s\n", e.what());
     }
 err:
+    // Increment inference_done even on error so task completion tracking works
+    task->inference_done++;
+done:
     // Free lltask - it was popped from the queue in fill_model_input_th
     av_freep(&request->lltask);
 
