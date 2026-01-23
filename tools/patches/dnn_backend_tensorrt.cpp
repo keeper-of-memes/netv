@@ -427,6 +427,8 @@ static int load_cuda_kernels(TRTModel *trt_model, void *log_ctx) {
     if (err != CUDA_SUCCESS) {
         av_log(log_ctx, AV_LOG_ERROR, "Failed to get kernel %s: %s\n",
                DNN_CUDA_KERNEL_HWC_UINT8_TO_NCHW_FLOAT32, cuda_error_string(err));
+        p_cuModuleUnload(trt_model->cuda_module);
+        trt_model->cuda_module = NULL;
         return AVERROR(ENOSYS);
     }
 
@@ -435,6 +437,8 @@ static int load_cuda_kernels(TRTModel *trt_model, void *log_ctx) {
     if (err != CUDA_SUCCESS) {
         av_log(log_ctx, AV_LOG_ERROR, "Failed to get kernel %s: %s\n",
                DNN_CUDA_KERNEL_NCHW_FLOAT32_TO_HWC_UINT8, cuda_error_string(err));
+        p_cuModuleUnload(trt_model->cuda_module);
+        trt_model->cuda_module = NULL;
         return AVERROR(ENOSYS);
     }
 
@@ -443,6 +447,8 @@ static int load_cuda_kernels(TRTModel *trt_model, void *log_ctx) {
     if (err != CUDA_SUCCESS) {
         av_log(log_ctx, AV_LOG_ERROR, "Failed to get kernel %s: %s\n",
                DNN_CUDA_KERNEL_HWC4_UINT8_TO_NCHW_FLOAT32, cuda_error_string(err));
+        p_cuModuleUnload(trt_model->cuda_module);
+        trt_model->cuda_module = NULL;
         return AVERROR(ENOSYS);
     }
 
@@ -451,6 +457,8 @@ static int load_cuda_kernels(TRTModel *trt_model, void *log_ctx) {
     if (err != CUDA_SUCCESS) {
         av_log(log_ctx, AV_LOG_ERROR, "Failed to get kernel %s: %s\n",
                DNN_CUDA_KERNEL_NCHW_FLOAT32_TO_HWC4_UINT8, cuda_error_string(err));
+        p_cuModuleUnload(trt_model->cuda_module);
+        trt_model->cuda_module = NULL;
         return AVERROR(ENOSYS);
     }
 
