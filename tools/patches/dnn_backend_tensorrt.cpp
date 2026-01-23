@@ -72,8 +72,11 @@ typedef CUresult (*fn_cuMemFree)(CUdeviceptr);
 typedef cudaError_t (*fn_cudaMalloc)(void**, size_t);
 typedef cudaError_t (*fn_cudaFree)(void*);
 typedef cudaError_t (*fn_cudaSetDevice)(int);
+typedef cudaError_t (*fn_cudaMemcpy)(void*, const void*, size_t, int);
 typedef cudaError_t (*fn_cudaMemcpyAsync)(void*, const void*, size_t, int, cudaStream_t);
 typedef cudaError_t (*fn_cudaStreamSynchronize)(cudaStream_t);
+typedef cudaError_t (*fn_cudaStreamCreate)(cudaStream_t*, unsigned int);
+typedef cudaError_t (*fn_cudaStreamDestroy)(cudaStream_t);
 #define cudaMemcpyHostToDevice 1
 #define cudaMemcpyDeviceToHost 2
 typedef CUresult (*fn_cuMemcpyHtoD)(CUdeviceptr, const void*, size_t);
@@ -114,6 +117,10 @@ static fn_cuMemFree p_cuMemFree = NULL;
 static fn_cudaMalloc p_cudaMalloc = NULL;
 static fn_cudaFree p_cudaFree = NULL;
 static fn_cudaSetDevice p_cudaSetDevice = NULL;
+static fn_cudaMemcpy p_cudaMemcpy = NULL;
+static fn_cudaMemcpyAsync p_cudaMemcpyAsync = NULL;
+static fn_cudaStreamSynchronize p_cudaStreamSynchronize_rt = NULL;  // Runtime API stream sync
+static fn_cudaStreamCreate p_cudaStreamCreate_rt = NULL;  // Runtime API stream create
 static void *cuda_rt_handle = NULL;  // libcudart.so handle
 static fn_cuMemcpyHtoD p_cuMemcpyHtoD = NULL;
 static fn_cuMemcpyDtoH p_cuMemcpyDtoH = NULL;
@@ -192,6 +199,7 @@ static int load_libs(void *log_ctx) {
         if (!p_##name) { \
             av_log(log_ctx, AV_LOG_ERROR, "Failed to load CUDA function: %s\n", #name); \
             dlclose(libcuda_handle); libcuda_handle = NULL; \
+            libs_load_attempted.store(1, std::memory_order_release); \
             return AVERROR(ENOSYS); \
         }
 
@@ -226,6 +234,7 @@ static int load_libs(void *log_ctx) {
         av_log(log_ctx, AV_LOG_ERROR, "cuInit failed: %s\n", cuda_error_string(err));
         dlclose(libcuda_handle);
         libcuda_handle = NULL;
+        libs_load_attempted.store(1, std::memory_order_release);
         return AVERROR(ENOSYS);
     }
 
@@ -241,15 +250,27 @@ static int load_libs(void *log_ctx) {
     }
     if (!cuda_rt_handle) {
         av_log(log_ctx, AV_LOG_ERROR, "Failed to load CUDA runtime library (libcudart.so)\n");
+        dlclose(libcuda_handle);
+        libcuda_handle = NULL;
+        cuda_loaded = 0;
+        libs_load_attempted.store(1, std::memory_order_release);
         return AVERROR(ENOSYS);
     }
     p_cudaMalloc = (fn_cudaMalloc)dlsym(cuda_rt_handle, "cudaMalloc");
     p_cudaFree = (fn_cudaFree)dlsym(cuda_rt_handle, "cudaFree");
     p_cudaSetDevice = (fn_cudaSetDevice)dlsym(cuda_rt_handle, "cudaSetDevice");
-    if (!p_cudaMalloc || !p_cudaFree || !p_cudaSetDevice) {
+    p_cudaMemcpy = (fn_cudaMemcpy)dlsym(cuda_rt_handle, "cudaMemcpy");
+    p_cudaMemcpyAsync = (fn_cudaMemcpyAsync)dlsym(cuda_rt_handle, "cudaMemcpyAsync");
+    p_cudaStreamSynchronize_rt = (fn_cudaStreamSynchronize)dlsym(cuda_rt_handle, "cudaStreamSynchronize");
+    p_cudaStreamCreate_rt = (fn_cudaStreamCreate)dlsym(cuda_rt_handle, "cudaStreamCreate");
+    if (!p_cudaMalloc || !p_cudaFree || !p_cudaSetDevice || !p_cudaMemcpy) {
         av_log(log_ctx, AV_LOG_ERROR, "Failed to load CUDA runtime API functions\n");
         dlclose(cuda_rt_handle);
         cuda_rt_handle = NULL;
+        dlclose(libcuda_handle);
+        libcuda_handle = NULL;
+        cuda_loaded = 0;
+        libs_load_attempted.store(1, std::memory_order_release);
         return AVERROR(ENOSYS);
     }
 
@@ -265,6 +286,7 @@ static int load_libs(void *log_ctx) {
                "TensorRT not available: %s\n"
                "Install TensorRT or run with --gpus all to use nvidia-container-toolkit\n",
                dlerror());
+        libs_load_attempted.store(1, std::memory_order_release);
         return AVERROR(ENOSYS);
     }
 
@@ -282,6 +304,7 @@ static int load_libs(void *log_ctx) {
         av_log(log_ctx, AV_LOG_ERROR, "Failed to find createInferRuntime in TensorRT library\n");
         dlclose(libnvinfer_handle);
         libnvinfer_handle = NULL;
+        libs_load_attempted.store(1, std::memory_order_release);
         return AVERROR(ENOSYS);
     }
 
@@ -433,8 +456,8 @@ static int load_cuda_kernels(TRTModel *trt_model, void *log_ctx) {
 // Launch kernel with Driver API
 static int launch_kernel(CUfunction func, CUstream stream,
                          int width, int height, void **args, void *log_ctx) {
-    // 16x16 thread blocks
-    unsigned int block_x = 16, block_y = 16;
+    // 32x8 thread blocks (better warp utilization for row-major image access)
+    unsigned int block_x = 32, block_y = 8;
     unsigned int grid_x = (width + block_x - 1) / block_x;
     unsigned int grid_y = (height + block_y - 1) / block_y;
 
@@ -502,20 +525,20 @@ static void dnn_free_model_trt(DNNModel **model)
 
     trt_model = (TRTModel *)(*model);
 
-    // Free CUDA resources (using Driver API)
-    if (trt_model->input_buffer) {
-        p_cuMemFree(trt_model->input_buffer);
+    // Free CUDA resources (using Runtime API - must match cudaMalloc allocation)
+    if (trt_model->input_buffer && p_cudaFree) {
+        p_cudaFree((void*)trt_model->input_buffer);
         trt_model->input_buffer = 0;
     }
-    if (trt_model->output_buffer) {
-        p_cuMemFree(trt_model->output_buffer);
+    if (trt_model->output_buffer && p_cudaFree) {
+        p_cudaFree((void*)trt_model->output_buffer);
         trt_model->output_buffer = 0;
     }
-    if (trt_model->cuda_module) {
+    if (trt_model->cuda_module && p_cuModuleUnload) {
         p_cuModuleUnload(trt_model->cuda_module);
         trt_model->cuda_module = NULL;
     }
-    if (trt_model->stream) {
+    if (trt_model->stream && p_cuStreamDestroy) {
         p_cuStreamDestroy(trt_model->stream);
         trt_model->stream = NULL;
     }
@@ -637,17 +660,12 @@ static int fill_model_input_trt(TRTModel *trt_model, TRTRequestItem *request)
         int linesize = task->in_frame->linesize[0];
         CUdeviceptr cuda_data = (CUdeviceptr)task->in_frame->data[0];
 
-        av_log(ctx, AV_LOG_DEBUG, "CUDA frame input: %dx%d, sw_format=%s, linesize=%d\n",
-               width, height, av_get_pix_fmt_name(hw_frames->sw_format), linesize);
-
         // For RGB24/BGR24: convert uint8 HWC to float32 NCHW on GPU (zero-copy)
         if (hw_frames->sw_format == AV_PIX_FMT_RGB24 || hw_frames->sw_format == AV_PIX_FMT_BGR24) {
             void *args[] = {&cuda_data, &trt_model->input_buffer, &height, &width, &linesize};
             ret = launch_kernel(trt_model->kernel_hwc_to_nchw, trt_model->stream,
                                width, height, args, ctx);
             if (ret != 0) return ret;
-
-            av_log(ctx, AV_LOG_DEBUG, "CUDA RGB24 zero-copy input: %dx%d -> TensorRT buffer\n", width, height);
             return 0;
         }
 
@@ -663,8 +681,6 @@ static int fill_model_input_trt(TRTModel *trt_model, TRTRequestItem *request)
             ret = launch_kernel(trt_model->kernel_hwc4_to_nchw, trt_model->stream,
                                width, height, args, ctx);
             if (ret != 0) return ret;
-
-            av_log(ctx, AV_LOG_DEBUG, "CUDA 4-channel zero-copy input: %dx%d -> TensorRT buffer\n", width, height);
             return 0;
         }
 
@@ -680,8 +696,6 @@ static int fill_model_input_trt(TRTModel *trt_model, TRTRequestItem *request)
             ret = launch_kernel(trt_model->kernel_hwc4_to_nchw, trt_model->stream,
                                width, height, args, ctx);
             if (ret != 0) return ret;
-
-            av_log(ctx, AV_LOG_DEBUG, "CUDA ARGB zero-copy input: %dx%d -> TensorRT buffer\n", width, height);
             return 0;
         }
 
@@ -715,10 +729,11 @@ static int fill_model_input_trt(TRTModel *trt_model, TRTRequestItem *request)
         return AVERROR(EINVAL);
     }
 
-    // Copy input to GPU using synchronous copy (safe to free buffer after)
-    CUresult err = p_cuMemcpyHtoD(trt_model->input_buffer, input_data, trt_model->input_size);
-    if (err != CUDA_SUCCESS) {
-        av_log(ctx, AV_LOG_ERROR, "Failed to copy input to GPU: %s\n", cuda_error_string(err));
+    // Copy input to GPU using CUDA Runtime API (compatible with TensorRT's Runtime API context)
+    cudaError_t cuda_err = p_cudaMemcpy((void*)trt_model->input_buffer, input_data,
+                                         trt_model->input_size, cudaMemcpyHostToDevice);
+    if (cuda_err != cudaSuccess) {
+        av_log(ctx, AV_LOG_ERROR, "cudaMemcpy failed for input: %d\n", cuda_err);
         av_freep(&input_data);
         return AVERROR(EIO);
     }
@@ -741,31 +756,20 @@ static int trt_start_inference(void *args)
         return DNN_GENERIC_ERROR;
     }
 
-    // Set tensor addresses (TensorRT 10.x API)
-    // Note: TensorRT expects void* but we have CUdeviceptr - cast appropriately
-    if (!trt_model->context->setTensorAddress(trt_model->input_name, (void*)trt_model->input_buffer)) {
-        av_log(ctx, AV_LOG_ERROR, "Failed to set input tensor address\n");
-        return DNN_GENERIC_ERROR;
-    }
-    if (!trt_model->context->setTensorAddress(trt_model->output_name, (void*)trt_model->output_buffer)) {
-        av_log(ctx, AV_LOG_ERROR, "Failed to set output tensor address\n");
-        return DNN_GENERIC_ERROR;
-    }
+    // NOTE: Tensor addresses are set once during model load (not per-frame)
+    // since input/output buffers are persistent
 
     // Run inference (TensorRT 10.x API)
     // Note: TensorRT's enqueueV3 expects cudaStream_t which is internally same as CUstream
+    // enqueueV3 is asynchronous - sync happens in infer_completion_callback after output processing
     bool success = trt_model->context->enqueueV3((cudaStream_t)trt_model->stream);
     if (!success) {
         av_log(ctx, AV_LOG_ERROR, "TensorRT inference failed\n");
         return DNN_GENERIC_ERROR;
     }
 
-    // Synchronize
-    CUresult err = p_cuStreamSynchronize(trt_model->stream);
-    if (err != CUDA_SUCCESS) {
-        av_log(ctx, AV_LOG_ERROR, "Stream sync failed: %s\n", cuda_error_string(err));
-        return DNN_GENERIC_ERROR;
-    }
+    // NOTE: No sync here - for zero-copy paths, we sync once after the output kernel
+    // For CPU paths, we sync before cudaMemcpy DtoH in infer_completion_callback
 
     return 0;
 }
@@ -779,7 +783,6 @@ static void infer_completion_callback(void *args)
     DnnContext *ctx = trt_model->ctx;
     DNNData outputs = { 0 };
     float *output_data = NULL;
-    CUresult err;
     size_t output_elements;
     int ret;
 
@@ -807,9 +810,6 @@ static void infer_completion_callback(void *args)
         int out_linesize = task->out_frame->linesize[0];
         CUdeviceptr cuda_out = (CUdeviceptr)task->out_frame->data[0];
 
-        av_log(ctx, AV_LOG_DEBUG, "CUDA frame output: %dx%d, sw_format=%s, linesize=%d\n",
-               out_width, out_height, av_get_pix_fmt_name(hw_frames->sw_format), out_linesize);
-
         // For RGB24/BGR24: convert float32 NCHW to uint8 HWC on GPU (zero-copy)
         if (hw_frames->sw_format == AV_PIX_FMT_RGB24 || hw_frames->sw_format == AV_PIX_FMT_BGR24) {
             void *args[] = {&trt_model->output_buffer, &cuda_out, &out_height, &out_width, &out_linesize};
@@ -822,9 +822,6 @@ static void infer_completion_callback(void *args)
 
             task->out_frame->width = out_width;
             task->out_frame->height = out_height;
-
-            av_log(ctx, AV_LOG_DEBUG, "CUDA RGB24 zero-copy output: %dx%d complete\n", out_width, out_height);
-
             task->inference_done++;
             goto done;
         }
@@ -847,9 +844,6 @@ static void infer_completion_callback(void *args)
 
             task->out_frame->width = out_width;
             task->out_frame->height = out_height;
-
-            av_log(ctx, AV_LOG_DEBUG, "CUDA 4-channel zero-copy output: %dx%d complete\n", out_width, out_height);
-
             task->inference_done++;
             goto done;
         }
@@ -872,9 +866,6 @@ static void infer_completion_callback(void *args)
 
             task->out_frame->width = out_width;
             task->out_frame->height = out_height;
-
-            av_log(ctx, AV_LOG_DEBUG, "CUDA ARGB zero-copy output: %dx%d complete\n", out_width, out_height);
-
             task->inference_done++;
             goto done;
         }
@@ -891,12 +882,33 @@ static void infer_completion_callback(void *args)
         goto err;
     }
 
-    // Copy output from GPU using Driver API
-    err = p_cuMemcpyDtoH(output_data, trt_model->output_buffer, trt_model->output_size);
-    if (err != CUDA_SUCCESS) {
-        av_log(ctx, AV_LOG_ERROR, "Failed to copy output from GPU: %s\n", cuda_error_string(err));
-        av_freep(&output_data);
-        goto err;
+    // Sync stream before copying (inference runs async on stream)
+    if (p_cudaStreamSynchronize_rt) {
+        cudaError_t sync_err = p_cudaStreamSynchronize_rt((cudaStream_t)trt_model->stream);
+        if (sync_err != cudaSuccess) {
+            av_log(ctx, AV_LOG_ERROR, "Stream sync failed before output copy: %d\n", sync_err);
+            av_freep(&output_data);
+            goto err;
+        }
+    } else {
+        // Fallback to Driver API sync
+        CUresult err = p_cuStreamSynchronize(trt_model->stream);
+        if (err != CUDA_SUCCESS) {
+            av_log(ctx, AV_LOG_ERROR, "Stream sync failed: %s\n", cuda_error_string(err));
+            av_freep(&output_data);
+            goto err;
+        }
+    }
+
+    // Copy output from GPU using CUDA Runtime API
+    {
+        cudaError_t cuda_err = p_cudaMemcpy(output_data, (void*)trt_model->output_buffer,
+                                             trt_model->output_size, cudaMemcpyDeviceToHost);
+        if (cuda_err != cudaSuccess) {
+            av_log(ctx, AV_LOG_ERROR, "cudaMemcpy failed for output: %d\n", cuda_err);
+            av_freep(&output_data);
+            goto err;
+        }
     }
 
     switch (trt_model->model.func_type) {
@@ -968,7 +980,7 @@ static int execute_model_trt(TRTRequestItem *request, Queue *lltask_queue)
 
 err:
     trt_free_request(request->infer_request);
-    if (trt_model && ff_safe_queue_push_back(trt_model->request_queue, request) < 0) {
+    if (!trt_model || ff_safe_queue_push_back(trt_model->request_queue, request) < 0) {
         destroy_request_item(&request);
     }
     return ret;
@@ -1009,8 +1021,7 @@ static DNNModel *dnn_load_model_trt(DnnContext *ctx, DNNFunctionType func_type, 
         goto fail;
     }
 
-    // Set CUDA device for TensorRT operations
-    // We use cudaSetDevice (Runtime API) for compatibility with TensorRT
+    // Set CUDA device using Runtime API for TensorRT compatibility
     if (p_cudaSetDevice) {
         int device_id = ctx->trt_option.device_id;
         cudaError_t cuda_err = p_cudaSetDevice(device_id);
@@ -1164,7 +1175,8 @@ static DNNModel *dnn_load_model_trt(DnnContext *ctx, DNNFunctionType func_type, 
         }
 
         // Allocate GPU buffers using CUDA Runtime API (cudaMalloc)
-        // Runtime API is compatible with TensorRT which also uses Runtime API
+        // Runtime API works because TensorRT internally uses Runtime API
+        // Driver API (cuMemAlloc) fails with "invalid device context" on TensorRT 10 + CUDA 13
         if (p_cudaMalloc) {
             void *input_ptr = NULL, *output_ptr = NULL;
             cudaError_t cuda_err = p_cudaMalloc(&input_ptr, trt_model->input_size);
@@ -1182,6 +1194,16 @@ static DNNModel *dnn_load_model_trt(DnnContext *ctx, DNNFunctionType func_type, 
             trt_model->output_buffer = (CUdeviceptr)output_ptr;
         } else {
             av_log(ctx, AV_LOG_ERROR, "CUDA runtime API not available for buffer allocation\n");
+            goto fail;
+        }
+
+        // Set tensor addresses once (buffers are persistent, no need to set per-frame)
+        if (!trt_model->context->setTensorAddress(trt_model->input_name, (void*)trt_model->input_buffer)) {
+            av_log(ctx, AV_LOG_ERROR, "Failed to set input tensor address\n");
+            goto fail;
+        }
+        if (!trt_model->context->setTensorAddress(trt_model->output_name, (void*)trt_model->output_buffer)) {
+            av_log(ctx, AV_LOG_ERROR, "Failed to set output tensor address\n");
             goto fail;
         }
     }
@@ -1268,6 +1290,9 @@ static int dnn_execute_model_trt(const DNNModel *model, DNNExecBaseParams *exec_
     ret = extract_lltask_from_task(task, trt_model->lltask_queue);
     if (ret != 0) {
         av_log(ctx, AV_LOG_ERROR, "unable to extract last level task from task.\n");
+        // Remove task from queue since extraction failed
+        ff_queue_pop_back(trt_model->task_queue);
+        av_freep(&task);
         return ret;
     }
 

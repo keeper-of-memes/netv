@@ -329,8 +329,10 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
     // Standard CPU path - allocate memory for input data
     input.data = av_malloc(input.dims[height_idx] * input.dims[width_idx] *
                            input.dims[channel_idx] * sizeof(float));
-    if (!input.data)
-        return AVERROR(ENOMEM);
+    if (!input.data) {
+        ret = AVERROR(ENOMEM);
+        goto err;
+    }
 
     switch (th_model->model.func_type) {
     case DFT_PROCESS_FRAME:
@@ -345,7 +347,9 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
         break;
     default:
         avpriv_report_missing_feature(NULL, "model function type %d", th_model->model.func_type);
-        break;
+        av_freep(&input.data);
+        ret = AVERROR(ENOSYS);
+        goto err;
     }
     *infer_request->input_tensor = torch::from_blob(input.data,
         {1, input.dims[channel_idx], input.dims[height_idx], input.dims[width_idx]},
@@ -582,8 +586,8 @@ static void infer_completion_callback(void *args) {
     }
     task->inference_done++;
 err:
-    // Clear lltask pointer (will be freed separately if still in queue, or already processed)
-    request->lltask = NULL;
+    // Free lltask - it was popped from the queue in fill_model_input_th
+    av_freep(&request->lltask);
 
     // Free the inference request data (tensors)
     th_free_request(infer_request);
@@ -649,6 +653,11 @@ static int execute_model_th(THRequestItem *request, Queue *lltask_queue)
     if (task->async) {
         std::lock_guard<std::mutex> lock(*th_model->mutex);
         if (ff_safe_queue_push_back(th_model->pending_queue, request) < 0) {
+            th_free_request(request->infer_request);
+            av_freep(&request->lltask);
+            if (ff_safe_queue_push_back(th_model->request_queue, request) < 0) {
+                destroy_request_item(&request);
+            }
             return AVERROR(ENOMEM);
         }
         th_model->cond->notify_one();
@@ -665,7 +674,8 @@ static int execute_model_th(THRequestItem *request, Queue *lltask_queue)
 
 err:
     th_free_request(request->infer_request);
-    if (ff_safe_queue_push_back(th_model->request_queue, request) < 0) {
+    av_freep(&request->lltask);  // Free lltask to avoid leak and dangling pointer
+    if (!th_model || ff_safe_queue_push_back(th_model->request_queue, request) < 0) {
         destroy_request_item(&request);
     }
     return ret;

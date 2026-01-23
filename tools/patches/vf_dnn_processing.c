@@ -148,8 +148,6 @@ static int check_modelinput_inlink(const DNNData *model_input, const AVFilterLin
         avpriv_report_missing_feature(ctx, "%s", av_get_pix_fmt_name(fmt));
         return AVERROR(EIO);
     }
-
-    return 0;
 }
 
 static int config_input(AVFilterLink *inlink)
@@ -250,8 +248,10 @@ static int config_output(AVFilterLink *outlink)
         }
 
         ol->hw_frames_ctx = av_buffer_ref(ctx->hw_frames_ctx);
-        if (!ol->hw_frames_ctx)
+        if (!ol->hw_frames_ctx) {
+            av_buffer_unref(&ctx->hw_frames_ctx);
             return AVERROR(ENOMEM);
+        }
 
         av_log(context, AV_LOG_INFO, "CUDA output frames: %dx%d\n", outlink->w, outlink->h);
         return 0;
@@ -309,6 +309,7 @@ static int flush_frame(AVFilterLink *outlink, int64_t pts, int64_t *out_pts)
         AVFrame *out_frame = NULL;
         async_state = ff_dnn_get_result(&ctx->dnnctx, &in_frame, &out_frame);
         if (out_frame) {
+            int64_t frame_pts = out_frame->pts;  // Save before ff_filter_frame may free
             if (in_frame && isPlanarYUV(in_frame->format))
                 copy_uv_planes(ctx, out_frame, in_frame);
             av_frame_free(&in_frame);
@@ -316,7 +317,7 @@ static int flush_frame(AVFilterLink *outlink, int64_t pts, int64_t *out_pts)
             if (ret < 0)
                 return ret;
             if (out_pts)
-                *out_pts = out_frame->pts + pts;
+                *out_pts = frame_pts + pts;
         }
         av_usleep(5000);
     } while (async_state >= DAST_NOT_READY);
@@ -363,7 +364,12 @@ static int activate(AVFilterContext *filter_ctx)
                     return AVERROR(ENOMEM);
                 }
             }
-            av_frame_copy_props(out, in);
+            ret = av_frame_copy_props(out, in);
+            if (ret < 0) {
+                av_frame_free(&in);
+                av_frame_free(&out);
+                return ret;
+            }
             if (ff_dnn_execute_model(&ctx->dnnctx, in, out) != 0) {
                 av_frame_free(&in);
                 av_frame_free(&out);
