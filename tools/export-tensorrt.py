@@ -182,8 +182,23 @@ def download_model(model_name, cache_dir):
 
     url = info.get("onnx_url") or info.get("url")
     print(f"Downloading {info['filename']}...")
-    urllib.request.urlretrieve(url, path)
-    print(f"Downloaded to {path}")
+
+    # Download to a temp file first, then rename to avoid partial downloads
+    temp_path = path + ".tmp"
+    try:
+        urllib.request.urlretrieve(url, temp_path)
+        # Verify the download succeeded and file is not empty
+        file_size = os.path.getsize(temp_path)
+        if file_size == 0:
+            raise RuntimeError(f"Downloaded file is empty: {temp_path}")
+        os.rename(temp_path, path)
+        print(f"Downloaded to {path} ({file_size / 1024 / 1024:.1f} MB)")
+    except Exception as e:
+        # Clean up partial download
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise RuntimeError(f"Failed to download model from {url}: {e}") from e
+
     return path
 
 
@@ -310,6 +325,11 @@ def build_engine(
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_gb * (1 << 30))
 
+    # Maximum optimization level (0-5, default is 3)
+    # Level 5 enables most aggressive kernel selection and fusion
+    config.builder_optimization_level = 5
+    print("  Optimization level: 5 (maximum)")
+
     profile = builder.create_optimization_profile()
     input_name = network.get_input(0).name
     profile.set_shape(
@@ -362,8 +382,16 @@ def build_engine(
 
 
 def height_to_shape(h, aspect=16 / 9):
-    """Convert height to (width, height) assuming aspect ratio."""
+    """Convert height to (width, height) assuming aspect ratio.
+
+    Both width and height are aligned to 8 pixels, as required by many
+    neural network architectures with pooling/striding layers.
+    """
+    # Align height to 8 first
+    h = (h + 7) // 8 * 8
+    # Calculate width from aligned height
     w = int(h * aspect)
+    # Align width to 8
     w = (w + 7) // 8 * 8
     return (w, h)
 

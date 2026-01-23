@@ -111,6 +111,18 @@ typedef CUresult (*fn_cuLaunchKernel)(CUfunction, unsigned int, unsigned int, un
                                        unsigned int, CUstream, void**, void**);
 typedef CUresult (*fn_cuGetErrorString)(CUresult, const char**);
 
+// CUDA Graph API function pointer types
+typedef void* CUgraph;
+typedef void* CUgraphExec;
+typedef CUresult (*fn_cuStreamBeginCapture)(CUstream, int);
+typedef CUresult (*fn_cuStreamEndCapture)(CUstream, CUgraph*);
+typedef CUresult (*fn_cuGraphInstantiate)(CUgraphExec*, CUgraph, unsigned long long);
+typedef CUresult (*fn_cuGraphLaunch)(CUgraphExec, CUstream);
+typedef CUresult (*fn_cuGraphDestroy)(CUgraph);
+typedef CUresult (*fn_cuGraphExecDestroy)(CUgraphExec);
+
+#define CU_STREAM_CAPTURE_MODE_GLOBAL 0
+
 // ============================================================================
 // Dynamic library loading for CUDA and TensorRT
 // ============================================================================
@@ -151,6 +163,15 @@ static fn_cuModuleUnload p_cuModuleUnload = NULL;
 static fn_cuModuleGetFunction p_cuModuleGetFunction = NULL;
 static fn_cuLaunchKernel p_cuLaunchKernel = NULL;
 static fn_cuGetErrorString p_cuGetErrorString = NULL;
+
+// CUDA Graph API function pointers (optional - graceful fallback if unavailable)
+static fn_cuStreamBeginCapture p_cuStreamBeginCapture = NULL;
+static fn_cuStreamEndCapture p_cuStreamEndCapture = NULL;
+static fn_cuGraphInstantiate p_cuGraphInstantiate = NULL;
+static fn_cuGraphLaunch p_cuGraphLaunch = NULL;
+static fn_cuGraphDestroy p_cuGraphDestroy = NULL;
+static fn_cuGraphExecDestroy p_cuGraphExecDestroy = NULL;
+static int cuda_graphs_available = 0;
 
 // TensorRT factory function pointer
 typedef nvinfer1::IRuntime* (*fn_createInferRuntime)(nvinfer1::ILogger&);
@@ -242,6 +263,22 @@ static int load_libs(void *log_ctx) {
     LOAD_CUDA_FUNC(cuLaunchKernel);
     // cuGetErrorString is optional (for better error messages)
     p_cuGetErrorString = (fn_cuGetErrorString)dlsym(libcuda_handle, "cuGetErrorString");
+
+    // CUDA Graph API (optional - CUDA 10.0+, graceful fallback if unavailable)
+    p_cuStreamBeginCapture = (fn_cuStreamBeginCapture)dlsym(libcuda_handle, "cuStreamBeginCapture");
+    p_cuStreamEndCapture = (fn_cuStreamEndCapture)dlsym(libcuda_handle, "cuStreamEndCapture");
+    p_cuGraphInstantiate = (fn_cuGraphInstantiate)dlsym(libcuda_handle, "cuGraphInstantiateWithFlags");
+    p_cuGraphLaunch = (fn_cuGraphLaunch)dlsym(libcuda_handle, "cuGraphLaunch");
+    p_cuGraphDestroy = (fn_cuGraphDestroy)dlsym(libcuda_handle, "cuGraphDestroy");
+    p_cuGraphExecDestroy = (fn_cuGraphExecDestroy)dlsym(libcuda_handle, "cuGraphExecDestroy");
+
+    if (p_cuStreamBeginCapture && p_cuStreamEndCapture && p_cuGraphInstantiate &&
+        p_cuGraphLaunch && p_cuGraphDestroy && p_cuGraphExecDestroy) {
+        cuda_graphs_available = 1;
+        av_log(log_ctx, AV_LOG_INFO, "CUDA Graphs API available (reduced kernel launch overhead)\n");
+    } else {
+        av_log(log_ctx, AV_LOG_DEBUG, "CUDA Graphs API not available (CUDA 10.0+ required)\n");
+    }
 
     #undef LOAD_CUDA_FUNC
 
@@ -421,6 +458,12 @@ typedef struct TRTModel {
     nvinfer1::IExecutionContext *context;  // Lazily created on first inference
     TRTLogger *logger;
     CUstream stream;
+
+    // CUDA Graphs for reduced kernel launch overhead
+    CUgraph cuda_graph;
+    CUgraphExec cuda_graph_exec;
+    int cuda_graph_captured;  // 1 if graph has been captured and is ready
+    int cuda_graph_failed;    // 1 if capture failed, don't retry
 
     // Engine cache entry (for refcounting shared engines)
     CachedEngine *cached_engine;
@@ -698,6 +741,16 @@ static void dnn_free_model_trt(DNNModel **model)
         p_cuStreamSynchronize(trt_model->stream);
     }
 
+    // Free CUDA Graph resources
+    if (trt_model->cuda_graph_exec && p_cuGraphExecDestroy) {
+        p_cuGraphExecDestroy(trt_model->cuda_graph_exec);
+        trt_model->cuda_graph_exec = NULL;
+    }
+    if (trt_model->cuda_graph && p_cuGraphDestroy) {
+        p_cuGraphDestroy(trt_model->cuda_graph);
+        trt_model->cuda_graph = NULL;
+    }
+
     // Free CUDA resources (using Runtime API - must match cudaMalloc allocation)
     if (trt_model->input_buffer && p_cudaFree) {
         p_cudaFree((void*)trt_model->input_buffer);
@@ -729,8 +782,9 @@ static void dnn_free_model_trt(DNNModel **model)
     // Handle cached engine - decrement refcount and only free when last reference
     if (trt_model->cached_engine) {
         std::lock_guard<std::mutex> lock(g_engine_cache_mutex);
-        int old_refcount = trt_model->cached_engine->refcount.load();
-        int remaining = --trt_model->cached_engine->refcount;
+        // Use atomic fetch_sub to avoid race condition - returns OLD value
+        int old_refcount = trt_model->cached_engine->refcount.fetch_sub(1, std::memory_order_acq_rel);
+        int remaining = old_refcount - 1;
         av_log(trt_model->ctx, AV_LOG_DEBUG, "Engine refcount: %d -> %d (path=%s)\n",
                old_refcount, remaining, trt_model->engine_path ? trt_model->engine_path : "null");
         if (remaining == 0) {
@@ -968,6 +1022,70 @@ static int fill_model_input_trt(TRTModel *trt_model, TRTRequestItem *request)
     return 0;
 }
 
+// Capture TensorRT inference into a CUDA Graph for reduced kernel launch overhead
+// Returns 0 on success, negative on failure (non-fatal, falls back to regular enqueue)
+static int trt_capture_cuda_graph(TRTModel *trt_model, void *log_ctx)
+{
+    CUresult err;
+
+    if (!cuda_graphs_available || trt_model->cuda_graph_failed) {
+        return -1;
+    }
+
+    av_log(log_ctx, AV_LOG_INFO, "Capturing TensorRT inference into CUDA Graph...\n");
+
+    // Synchronize stream before capture to ensure any pending work (e.g., input kernel) completes
+    // This prevents undefined behavior from capturing a stream with pending async operations
+    err = p_cuStreamSynchronize(trt_model->stream);
+    if (err != CUDA_SUCCESS) {
+        av_log(log_ctx, AV_LOG_WARNING, "Stream sync before graph capture failed: %s\n", cuda_error_string(err));
+        trt_model->cuda_graph_failed = 1;
+        return -1;
+    }
+
+    // Begin stream capture
+    err = p_cuStreamBeginCapture(trt_model->stream, CU_STREAM_CAPTURE_MODE_GLOBAL);
+    if (err != CUDA_SUCCESS) {
+        av_log(log_ctx, AV_LOG_WARNING, "CUDA Graph capture begin failed: %s\n", cuda_error_string(err));
+        trt_model->cuda_graph_failed = 1;
+        return -1;
+    }
+
+    // Execute TensorRT inference (this gets captured into the graph)
+    bool success = trt_model->context->enqueueV3((cudaStream_t)trt_model->stream);
+    if (!success) {
+        // End capture to clean up, ignore the graph
+        CUgraph temp_graph = NULL;
+        p_cuStreamEndCapture(trt_model->stream, &temp_graph);
+        if (temp_graph) p_cuGraphDestroy(temp_graph);
+        av_log(log_ctx, AV_LOG_WARNING, "TensorRT inference failed during graph capture\n");
+        trt_model->cuda_graph_failed = 1;
+        return -1;
+    }
+
+    // End stream capture
+    err = p_cuStreamEndCapture(trt_model->stream, &trt_model->cuda_graph);
+    if (err != CUDA_SUCCESS || !trt_model->cuda_graph) {
+        av_log(log_ctx, AV_LOG_WARNING, "CUDA Graph capture end failed: %s\n", cuda_error_string(err));
+        trt_model->cuda_graph_failed = 1;
+        return -1;
+    }
+
+    // Instantiate the graph for execution
+    err = p_cuGraphInstantiate(&trt_model->cuda_graph_exec, trt_model->cuda_graph, 0);
+    if (err != CUDA_SUCCESS || !trt_model->cuda_graph_exec) {
+        av_log(log_ctx, AV_LOG_WARNING, "CUDA Graph instantiate failed: %s\n", cuda_error_string(err));
+        p_cuGraphDestroy(trt_model->cuda_graph);
+        trt_model->cuda_graph = NULL;
+        trt_model->cuda_graph_failed = 1;
+        return -1;
+    }
+
+    trt_model->cuda_graph_captured = 1;
+    av_log(log_ctx, AV_LOG_INFO, "CUDA Graph captured successfully (reduced kernel launch overhead)\n");
+    return 0;
+}
+
 static int trt_start_inference(void *args)
 {
     TRTRequestItem *request = (TRTRequestItem *)args;
@@ -994,13 +1112,31 @@ static int trt_start_inference(void *args)
     // NOTE: Tensor addresses are set once during model load (not per-frame)
     // since input/output buffers are persistent
 
-    // Run inference (TensorRT 10.x API)
-    // Note: TensorRT's enqueueV3 expects cudaStream_t which is internally same as CUstream
-    // enqueueV3 is asynchronous - sync happens in infer_completion_callback after output processing
-    bool success = trt_model->context->enqueueV3((cudaStream_t)trt_model->stream);
-    if (!success) {
-        av_log(ctx, AV_LOG_ERROR, "TensorRT inference failed\n");
-        return DNN_GENERIC_ERROR;
+    // Try to use CUDA Graph for reduced kernel launch overhead
+    // First frame: capture the graph; subsequent frames: launch the captured graph
+    if (cuda_graphs_available && !trt_model->cuda_graph_captured && !trt_model->cuda_graph_failed) {
+        // Capture on first inference
+        if (trt_capture_cuda_graph(trt_model, ctx) == 0) {
+            // Graph captured - we already ran inference during capture, so return
+            return 0;
+        }
+        // Capture failed - fall through to regular execution
+    }
+
+    if (trt_model->cuda_graph_captured && trt_model->cuda_graph_exec) {
+        // Execute the captured graph (much lower overhead than enqueueV3)
+        CUresult err = p_cuGraphLaunch(trt_model->cuda_graph_exec, trt_model->stream);
+        if (err != CUDA_SUCCESS) {
+            av_log(ctx, AV_LOG_ERROR, "CUDA Graph launch failed: %s\n", cuda_error_string(err));
+            return DNN_GENERIC_ERROR;
+        }
+    } else {
+        // Regular execution path (fallback if graphs not available or capture failed)
+        bool success = trt_model->context->enqueueV3((cudaStream_t)trt_model->stream);
+        if (!success) {
+            av_log(ctx, AV_LOG_ERROR, "TensorRT inference failed\n");
+            return DNN_GENERIC_ERROR;
+        }
     }
 
     // NOTE: No sync here - for zero-copy paths, we sync once after the output kernel
@@ -1236,6 +1372,27 @@ static int execute_model_trt(TRTRequestItem *request, Queue *lltask_queue)
 err:
     trt_free_request(request->infer_request);
     av_freep(&request->lltask);  // Free lltask that was popped from queue
+    // Clean up the task that was left in task_queue to prevent memory leak
+    // The task is at the back since we just pushed it in dnn_execute_model_trt
+    if (trt_model && task) {
+        // Remove task from queue - it should be the last one we added
+        // Iterate to find and remove it (safer than assuming position)
+        Queue *tq = trt_model->task_queue;
+        size_t queue_size = ff_queue_size(tq);
+        for (size_t i = 0; i < queue_size; i++) {
+            TaskItem *queued_task = (TaskItem *)ff_queue_peek_front(tq);
+            if (queued_task == task) {
+                ff_queue_pop_front(tq);
+                av_frame_free(&task->in_frame);
+                av_frame_free(&task->out_frame);
+                av_freep(&task);
+                break;
+            }
+            // Move to next by popping and re-pushing (rotate queue)
+            ff_queue_pop_front(tq);
+            ff_queue_push_back(tq, queued_task);
+        }
+    }
     if (!trt_model || ff_safe_queue_push_back(trt_model->request_queue, request) < 0) {
         destroy_request_item(&request);
     }
@@ -1311,11 +1468,12 @@ static DNNModel *dnn_load_model_trt(DnnContext *ctx, DNNFunctionType func_type, 
                 g_engine_cache.erase(it);
                 trt_model->cached_engine = nullptr;
             } else {
-                trt_model->cached_engine->refcount++;
+                // Use atomic fetch_add to avoid race condition
+                int new_refcount = trt_model->cached_engine->refcount.fetch_add(1, std::memory_order_acq_rel) + 1;
                 trt_model->engine = trt_model->cached_engine->engine;
                 trt_model->runtime = trt_model->cached_engine->runtime;
                 av_log(ctx, AV_LOG_INFO, "Reusing cached TensorRT engine (refcount=%d, engine=%p)\n",
-                       trt_model->cached_engine->refcount.load(), (void*)trt_model->engine);
+                       new_refcount, (void*)trt_model->engine);
             }
         }
         if (!trt_model->cached_engine) {
@@ -1376,11 +1534,12 @@ static DNNModel *dnn_load_model_trt(DnnContext *ctx, DNNFunctionType func_type, 
                 delete trt_model->engine;
                 delete trt_model->runtime;
                 trt_model->cached_engine = it->second;
-                trt_model->cached_engine->refcount++;
+                // Use atomic fetch_add to avoid race condition
+                int new_refcount = trt_model->cached_engine->refcount.fetch_add(1, std::memory_order_acq_rel) + 1;
                 trt_model->engine = trt_model->cached_engine->engine;
                 trt_model->runtime = trt_model->cached_engine->runtime;
                 av_log(ctx, AV_LOG_INFO, "Using engine added by another thread (refcount=%d)\n",
-                       trt_model->cached_engine->refcount.load());
+                       new_refcount);
             }
         }
     }
@@ -1388,6 +1547,12 @@ static DNNModel *dnn_load_model_trt(DnnContext *ctx, DNNFunctionType func_type, 
     // NOTE: Execution context is created lazily on first inference (saves ~720MB for probe instances)
     // FFmpeg creates two filter instances: one for probing (never runs inference) and one for execution
     trt_model->context = nullptr;
+
+    // CUDA Graph state (captured lazily on first inference)
+    trt_model->cuda_graph = NULL;
+    trt_model->cuda_graph_exec = NULL;
+    trt_model->cuda_graph_captured = 0;
+    trt_model->cuda_graph_failed = 0;
 
     // Create CUDA stream for TensorRT operations
     err = p_cuStreamCreate(&trt_model->stream, 0);
@@ -1487,10 +1652,11 @@ static DNNModel *dnn_load_model_trt(DnnContext *ctx, DNNFunctionType func_type, 
 
         // Calculate buffer sizes (allocation deferred to first inference via ensure_execution_context)
         {
-            int64_t in_elems = (int64_t)trt_model->input_dims.d[0] * trt_model->input_dims.d[1] *
-                               trt_model->input_dims.d[2] * trt_model->input_dims.d[3];
-            int64_t out_elems = (int64_t)trt_model->output_dims.d[0] * trt_model->output_dims.d[1] *
-                                trt_model->output_dims.d[2] * trt_model->output_dims.d[3];
+            // Cast each factor to int64_t to prevent overflow during multiplication
+            int64_t in_elems = (int64_t)trt_model->input_dims.d[0] * (int64_t)trt_model->input_dims.d[1] *
+                               (int64_t)trt_model->input_dims.d[2] * (int64_t)trt_model->input_dims.d[3];
+            int64_t out_elems = (int64_t)trt_model->output_dims.d[0] * (int64_t)trt_model->output_dims.d[1] *
+                                (int64_t)trt_model->output_dims.d[2] * (int64_t)trt_model->output_dims.d[3];
 
             size_t in_elem_size = trt_dtype_size(trt_model->input_dtype);
             size_t out_elem_size = trt_dtype_size(trt_model->output_dtype);
