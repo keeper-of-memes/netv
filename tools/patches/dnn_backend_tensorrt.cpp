@@ -94,6 +94,7 @@ typedef cudaError_t (*fn_cudaMemcpyAsync)(void*, const void*, size_t, int, cudaS
 typedef cudaError_t (*fn_cudaStreamSynchronize)(cudaStream_t);
 typedef cudaError_t (*fn_cudaStreamCreate)(cudaStream_t*, unsigned int);
 typedef cudaError_t (*fn_cudaStreamDestroy)(cudaStream_t);
+typedef cudaError_t (*fn_cudaMemGetInfo)(size_t*, size_t*);
 #define cudaMemcpyHostToDevice 1
 #define cudaMemcpyDeviceToHost 2
 typedef CUresult (*fn_cuMemcpyHtoD)(CUdeviceptr, const void*, size_t);
@@ -150,6 +151,7 @@ static fn_cudaMemcpy p_cudaMemcpy = NULL;
 static fn_cudaMemcpyAsync p_cudaMemcpyAsync = NULL;
 static fn_cudaStreamSynchronize p_cudaStreamSynchronize_rt = NULL;  // Runtime API stream sync
 static fn_cudaStreamCreate p_cudaStreamCreate_rt = NULL;  // Runtime API stream create
+static fn_cudaMemGetInfo p_cudaMemGetInfo = NULL;  // For memory diagnostics
 static void *cuda_rt_handle = NULL;  // libcudart.so handle
 static fn_cuMemcpyHtoD p_cuMemcpyHtoD = NULL;
 static fn_cuMemcpyDtoH p_cuMemcpyDtoH = NULL;
@@ -272,13 +274,16 @@ static int load_libs(void *log_ctx) {
     p_cuGraphDestroy = (fn_cuGraphDestroy)dlsym(libcuda_handle, "cuGraphDestroy");
     p_cuGraphExecDestroy = (fn_cuGraphExecDestroy)dlsym(libcuda_handle, "cuGraphExecDestroy");
 
-    if (p_cuStreamBeginCapture && p_cuStreamEndCapture && p_cuGraphInstantiate &&
-        p_cuGraphLaunch && p_cuGraphDestroy && p_cuGraphExecDestroy) {
-        cuda_graphs_available = 1;
-        av_log(log_ctx, AV_LOG_INFO, "CUDA Graphs API available (reduced kernel launch overhead)\n");
-    } else {
-        av_log(log_ctx, AV_LOG_DEBUG, "CUDA Graphs API not available (CUDA 10.0+ required)\n");
-    }
+    // CUDA Graphs disabled - adds ~1GB memory overhead with no fps improvement
+    // (TensorRT is compute-bound in convolutions, not kernel-launch-bound)
+    // Keep the function pointers loaded in case we want to re-enable later
+    (void)p_cuStreamBeginCapture;
+    (void)p_cuStreamEndCapture;
+    (void)p_cuGraphInstantiate;
+    (void)p_cuGraphLaunch;
+    (void)p_cuGraphDestroy;
+    (void)p_cuGraphExecDestroy;
+    cuda_graphs_available = 0;
 
     #undef LOAD_CUDA_FUNC
 
@@ -317,6 +322,7 @@ static int load_libs(void *log_ctx) {
     p_cudaMemcpyAsync = (fn_cudaMemcpyAsync)dlsym(cuda_rt_handle, "cudaMemcpyAsync");
     p_cudaStreamSynchronize_rt = (fn_cudaStreamSynchronize)dlsym(cuda_rt_handle, "cudaStreamSynchronize");
     p_cudaStreamCreate_rt = (fn_cudaStreamCreate)dlsym(cuda_rt_handle, "cudaStreamCreate");
+    p_cudaMemGetInfo = (fn_cudaMemGetInfo)dlsym(cuda_rt_handle, "cudaMemGetInfo");  // Optional, for diagnostics
     if (!p_cudaMalloc || !p_cudaFree || !p_cudaSetDevice || !p_cudaMemcpy) {
         av_log(log_ctx, AV_LOG_ERROR, "Failed to load CUDA runtime API functions\n");
         dlclose(cuda_rt_handle);
@@ -378,6 +384,16 @@ static int load_libs(void *log_ctx) {
     // Mark as attempted AFTER successful initialization (release semantics)
     libs_load_attempted.store(1, std::memory_order_release);
     return 0;
+}
+
+// Log GPU memory usage for diagnostics
+static void log_gpu_memory(void *log_ctx, const char *label) {
+    if (!p_cudaMemGetInfo) return;
+    size_t free_mem = 0, total_mem = 0;
+    if (p_cudaMemGetInfo(&free_mem, &total_mem) == 0) {
+        size_t used_mb = (total_mem - free_mem) / (1024 * 1024);
+        av_log(log_ctx, AV_LOG_WARNING, "GPU_MEM [%s]: %zu MiB used\n", label, used_mb);
+    }
 }
 
 // TensorRT logger - forward to FFmpeg's logging
@@ -633,6 +649,7 @@ static int ensure_execution_context(TRTModel *trt_model, void *log_ctx)
         av_log(log_ctx, AV_LOG_ERROR, "Failed to create execution context\n");
         return AVERROR(ENOMEM);
     }
+    log_gpu_memory(log_ctx, "after createExecutionContext");
 
     // Allocate GPU buffers now that we have context
     if (!trt_model->input_buffer) {
@@ -681,6 +698,7 @@ static int ensure_execution_context(TRTModel *trt_model, void *log_ctx)
 
         av_log(log_ctx, AV_LOG_INFO, "  Allocated GPU buffers: input=%zuMB output=%zuMB\n",
                trt_model->input_size / (1024 * 1024), trt_model->output_size / (1024 * 1024));
+        log_gpu_memory(log_ctx, "after buffer allocation");
     }
 
     return 0;
@@ -1434,6 +1452,8 @@ static DNNModel *dnn_load_model_trt(DnnContext *ctx, DNNFunctionType func_type, 
         goto fail;
     }
 
+    log_gpu_memory(ctx, "after load_libs");
+
     // Set CUDA device using Runtime API for TensorRT compatibility
     if (p_cudaSetDevice) {
         int device_id = ctx->trt_option.device_id;
@@ -1517,6 +1537,7 @@ static DNNModel *dnn_load_model_trt(DnnContext *ctx, DNNFunctionType func_type, 
                 av_log(ctx, AV_LOG_ERROR, "Failed to deserialize CUDA engine\n");
                 goto fail;
             }
+            log_gpu_memory(ctx, "after engine deserialize");
         }
 
         // Add to cache
@@ -1565,6 +1586,7 @@ static DNNModel *dnn_load_model_trt(DnnContext *ctx, DNNFunctionType func_type, 
     if (load_cuda_kernels(trt_model, ctx) < 0) {
         goto fail;
     }
+    log_gpu_memory(ctx, "after load_cuda_kernels");
 
     // Get I/O tensor info (TensorRT 10.x API)
     {

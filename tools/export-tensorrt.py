@@ -28,11 +28,21 @@ Example FFmpeg usage after export:
     ffmpeg -i input.mp4 -vf "dnn_processing=dnn_backend=tensorrt:model=model.engine" output.mp4
 """
 
+from __future__ import annotations
+
+from pathlib import Path
+from typing import TYPE_CHECKING, NotRequired, TypedDict
+
+
+if TYPE_CHECKING:
+    import tensorrt as trt
+
 import argparse
-import os
+import sys
 import tempfile
 import urllib.request
 
+import tensorrt as trt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -41,7 +51,18 @@ import torch.nn.functional as F
 class SRVGGNetCompact(nn.Module):
     """Compact SR network - fast inference, good quality."""
 
-    def __init__(self, num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=32, upscale=4):
+    upscale: int
+    body: nn.ModuleList
+    upsampler: nn.PixelShuffle
+
+    def __init__(
+        self,
+        num_in_ch: int = 3,
+        num_out_ch: int = 3,
+        num_feat: int = 64,
+        num_conv: int = 32,
+        upscale: int = 4,
+    ):
         super().__init__()
         self.upscale = upscale
         self.body = nn.ModuleList()
@@ -53,7 +74,7 @@ class SRVGGNetCompact(nn.Module):
         self.body.append(nn.Conv2d(num_feat, num_out_ch * upscale * upscale, 3, 1, 1))
         self.upsampler = nn.PixelShuffle(upscale)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = x
         for layer in self.body[:-1]:
             out = layer(out)
@@ -65,7 +86,14 @@ class SRVGGNetCompact(nn.Module):
 class ResidualDenseBlock(nn.Module):
     """Residual Dense Block for RRDBNet."""
 
-    def __init__(self, nf=64, gc=32):
+    conv1: nn.Conv2d
+    conv2: nn.Conv2d
+    conv3: nn.Conv2d
+    conv4: nn.Conv2d
+    conv5: nn.Conv2d
+    lrelu: nn.LeakyReLU
+
+    def __init__(self, nf: int = 64, gc: int = 32):
         super().__init__()
         self.conv1 = nn.Conv2d(nf, gc, 3, 1, 1)
         self.conv2 = nn.Conv2d(nf + gc, gc, 3, 1, 1)
@@ -74,7 +102,7 @@ class ResidualDenseBlock(nn.Module):
         self.conv5 = nn.Conv2d(nf + 4 * gc, nf, 3, 1, 1)
         self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x1 = self.lrelu(self.conv1(x))
         x2 = self.lrelu(self.conv2(torch.cat((x, x1), 1)))
         x3 = self.lrelu(self.conv3(torch.cat((x, x1, x2), 1)))
@@ -86,13 +114,17 @@ class ResidualDenseBlock(nn.Module):
 class RRDB(nn.Module):
     """Residual in Residual Dense Block."""
 
-    def __init__(self, nf, gc=32):
+    rdb1: ResidualDenseBlock
+    rdb2: ResidualDenseBlock
+    rdb3: ResidualDenseBlock
+
+    def __init__(self, nf: int, gc: int = 32):
         super().__init__()
         self.rdb1 = ResidualDenseBlock(nf, gc)
         self.rdb2 = ResidualDenseBlock(nf, gc)
         self.rdb3 = ResidualDenseBlock(nf, gc)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = self.rdb1(x)
         out = self.rdb2(out)
         out = self.rdb3(out)
@@ -102,8 +134,24 @@ class RRDB(nn.Module):
 class RRDBNet(nn.Module):
     """RRDBNet architecture for Real-ESRGAN - highest quality, slower."""
 
+    scale: int
+    conv_first: nn.Conv2d
+    body: nn.Sequential
+    conv_body: nn.Conv2d
+    conv_up1: nn.Conv2d
+    conv_up2: nn.Conv2d
+    conv_hr: nn.Conv2d
+    conv_last: nn.Conv2d
+    lrelu: nn.LeakyReLU
+
     def __init__(
-        self, num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4
+        self,
+        num_in_ch: int = 3,
+        num_out_ch: int = 3,
+        num_feat: int = 64,
+        num_block: int = 23,
+        num_grow_ch: int = 32,
+        scale: int = 4,
     ):
         super().__init__()
         self.scale = scale
@@ -116,18 +164,44 @@ class RRDBNet(nn.Module):
         self.conv_last = nn.Conv2d(num_feat, num_out_ch, 3, 1, 1)
         self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         feat = self.conv_first(x)
         body_feat = self.conv_body(self.body(feat))
         feat = feat + body_feat
-        feat = self.lrelu(self.conv_up1(F.interpolate(feat, scale_factor=2, mode="nearest")))
-        feat = self.lrelu(self.conv_up2(F.interpolate(feat, scale_factor=2, mode="nearest")))
+        feat = self.lrelu(
+            self.conv_up1(
+                F.interpolate(
+                    feat,
+                    scale_factor=2,
+                    mode="nearest",
+                )
+            )
+        )
+        feat = self.lrelu(
+            self.conv_up2(
+                F.interpolate(
+                    feat,
+                    scale_factor=2,
+                    mode="nearest",
+                )
+            )
+        )
         out = self.conv_last(self.lrelu(self.conv_hr(feat)))
         return out
 
 
-# Model registry - models with "onnx_url" skip PyTorch conversion
-MODELS = {
+class ModelInfo(TypedDict):
+    """Type definition for model registry entries."""
+
+    description: str
+    filename: str
+    scale: int
+    arch: str
+    url: NotRequired[str]
+    onnx_url: NotRequired[str]
+
+
+MODELS: dict[str, ModelInfo] = {
     # 2x models - high quality, 1080p → 4K
     "2x-liveaction-span": {
         "description": "Live action TV/film - handles compression, preserves grain",
@@ -152,9 +226,6 @@ MODELS = {
         "scale": 4,
         "arch": "rrdbnet",
     },
-    # Legacy aliases for backwards compatibility
-    "compact": {"alias": "4x-compact"},
-    "realesrgan": {"alias": "4x-realesrgan"},
     # NOTE: 4x-rrdbnet was removed because:
     # - 1080p engine build fails with OOM even on 32GB VRAM (RTX 5090)
     # - 720p engine causes "Invalid frame dimensions 0x0" errors during playback
@@ -162,70 +233,84 @@ MODELS = {
 }
 
 
-def resolve_model(model_name):
-    """Resolve model name, following aliases."""
+def resolve_model(model_name: str) -> tuple[str, ModelInfo]:
+    """Resolve model name."""
     info = MODELS.get(model_name)
     if info is None:
         raise ValueError(f"Unknown model: {model_name}")
-    if "alias" in info:
-        return info["alias"], MODELS[info["alias"]]
     return model_name, info
 
 
-def download_model(model_name, cache_dir):
+def download_model(model_name: str, cache_dir: Path) -> Path:
     """Download model weights (ONNX or PTH)."""
     model_name, info = resolve_model(model_name)
-    path = os.path.join(cache_dir, info["filename"])
-    if os.path.exists(path):
+    # Use .name to prevent path traversal
+    path = cache_dir / Path(info["filename"]).name
+    if path.exists():
         print(f"Using cached model: {path}")
         return path
 
     url = info.get("onnx_url") or info.get("url")
+    if url is None:
+        raise ValueError(f"No URL for model: {model_name}")
+    if not url.startswith("https://"):
+        raise ValueError(f"URL must use HTTPS: {url}")
     print(f"Downloading {info['filename']}...")
 
     # Download to a temp file first, then rename to avoid partial downloads
-    temp_path = path + ".tmp"
+    temp_path = path.with_suffix(path.suffix + ".tmp")
     try:
-        urllib.request.urlretrieve(url, temp_path)
+        with (
+            urllib.request.urlopen(url, timeout=300) as response,
+            open(temp_path, "wb") as f,
+        ):
+            f.write(response.read())
         # Verify the download succeeded and file is not empty
-        file_size = os.path.getsize(temp_path)
+        file_size = temp_path.stat().st_size
         if file_size == 0:
             raise RuntimeError(f"Downloaded file is empty: {temp_path}")
-        os.rename(temp_path, path)
+        temp_path.rename(path)
         print(f"Downloaded to {path} ({file_size / 1024 / 1024:.1f} MB)")
     except Exception as e:
         # Clean up partial download
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        if temp_path.exists():
+            temp_path.unlink()
         raise RuntimeError(f"Failed to download model from {url}: {e}") from e
 
     return path
 
 
-def list_models():
+def list_models() -> None:
     """Print available models."""
     print("\nAvailable models:\n")
     print("  2x models (1080p → 4K):")
     for name, info in MODELS.items():
-        if name.startswith("2x-") and "alias" not in info:
+        if name.startswith("2x-"):
             rec = " (recommended)" if name == "2x-liveaction-span" else ""
             print(f"    {name:24s} {info['description']}{rec}")
     print("\n  4x models (720p → 4K):")
     for name, info in MODELS.items():
-        if name.startswith("4x-") and "alias" not in info:
+        if name.startswith("4x-"):
             print(f"    {name:24s} {info['description']}")
     print()
 
 
-def get_model_and_onnx(model_name, cache_dir=None):
+def get_model_and_onnx(
+    model_name: str,
+    cache_dir: Path | None = None,
+) -> tuple[
+    nn.Module | None,
+    Path | None,
+    int,
+]:
     """Load model and return (model_or_none, onnx_path_or_none, scale).
 
     For ONNX-based models, returns (None, onnx_path, scale).
     For PTH-based models, returns (model, None, scale).
     """
     if cache_dir is None:
-        cache_dir = os.path.expanduser("~/.cache/ai_upscale")
-    os.makedirs(cache_dir, exist_ok=True)
+        cache_dir = Path.home() / ".cache" / "ai_upscale"
+    cache_dir.mkdir(parents=True, exist_ok=True)
 
     model_name, info = resolve_model(model_name)
     scale = info["scale"]
@@ -247,19 +332,32 @@ def get_model_and_onnx(model_name, cache_dir=None):
     elif "params" in state_dict:
         state_dict = state_dict["params"]
 
-    # Auto-detect model architecture from state dict
-    num_conv_layers = sum(1 for k, v in state_dict.items() if "weight" in k and len(v.shape) == 4)
-
-    if arch == "rrdbnet" or num_conv_layers > 50:
-        model = RRDBNet(
-            num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=scale
+    # Instantiate model based on explicit architecture
+    if arch == "rrdbnet":
+        model: nn.Module = RRDBNet(
+            num_in_ch=3,
+            num_out_ch=3,
+            num_feat=64,
+            num_block=23,
+            num_grow_ch=32,
+            scale=scale,
         )
         arch_name = "RRDBNet"
-    else:
+    elif arch == "compact":
+        # Count conv layers to determine num_conv for SRVGGNetCompact
+        num_conv_layers = sum(
+            1 for k, v in state_dict.items() if "weight" in k and len(v.shape) == 4
+        )
         model = SRVGGNetCompact(
-            num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=num_conv_layers, upscale=scale
+            num_in_ch=3,
+            num_out_ch=3,
+            num_feat=64,
+            num_conv=num_conv_layers,
+            upscale=scale,
         )
         arch_name = "SRVGGNetCompact"
+    else:
+        raise ValueError(f"Unknown architecture: {arch}")
 
     model.load_state_dict(state_dict)
     model.eval()
@@ -268,7 +366,7 @@ def get_model_and_onnx(model_name, cache_dir=None):
     return model, None, scale
 
 
-def export_onnx(model, opt_shape, onnx_path):
+def export_onnx(model: nn.Module, opt_shape: tuple[int, int], onnx_path: Path | str) -> None:
     """Export model to ONNX format with dynamic axes."""
     opt_w, opt_h = opt_shape
     print(f"Exporting to ONNX: {onnx_path}")
@@ -276,7 +374,16 @@ def export_onnx(model, opt_shape, onnx_path):
 
     dummy_input = torch.randn(1, 3, opt_h, opt_w, device="cpu")
 
-    dynamic_axes = {"input": {2: "height", 3: "width"}, "output": {2: "out_height", 3: "out_width"}}
+    dynamic_axes = {
+        "input": {
+            2: "height",
+            3: "width",
+        },
+        "output": {
+            2: "out_height",
+            3: "out_width",
+        },
+    }
 
     torch.onnx.export(
         model,
@@ -292,12 +399,36 @@ def export_onnx(model, opt_shape, onnx_path):
     print("  ONNX export complete (dynamic H/W)")
 
 
-def build_engine(
-    onnx_path, engine_path, min_shape, opt_shape, max_shape, fp16=False, fp16_io=False, workspace_gb=4
-):
-    """Build TensorRT engine from ONNX model with dynamic shapes."""
-    import tensorrt as trt
+def _get_trt_dtype_map() -> dict[str, trt.DataType]:
+    """Get mapping from precision string to TensorRT DataType."""
+    dtype_map: dict[str, trt.DataType] = {
+        "fp32": trt.float32,
+        "fp16": trt.float16,
+    }
+    if hasattr(trt, "bfloat16"):
+        dtype_map["bf16"] = trt.bfloat16
+    return dtype_map
 
+
+def _trt_dtype_str(dtype: trt.DataType) -> str:
+    """Convert TensorRT DataType to human-readable string."""
+    for name, dt in _get_trt_dtype_map().items():
+        if dtype == dt:
+            return name.upper()
+    return str(dtype)
+
+
+def build_engine(
+    onnx_path: Path | str,
+    engine_path: Path | str,
+    min_shape: tuple[int, int],
+    opt_shape: tuple[int, int],
+    max_shape: tuple[int, int],
+    precision: str = "fp16",
+    workspace_gb: int = 4,
+    opt_level: int = 3,
+) -> None:
+    """Build TensorRT engine from ONNX model with dynamic shapes."""
     min_w, min_h = min_shape
     opt_w, opt_h = opt_shape
     max_w, max_h = max_shape
@@ -307,8 +438,7 @@ def build_engine(
     print(f"    min: {min_w}x{min_h}")
     print(f"    opt: {opt_w}x{opt_h}")
     print(f"    max: {max_w}x{max_h}")
-    print(f"  FP16 compute: {fp16}")
-    print(f"  FP16 I/O: {fp16_io}")
+    print(f"  Precision: {precision}")
     print(f"  Workspace: {workspace_gb} GB")
 
     logger = trt.Logger(trt.Logger.INFO)
@@ -325,35 +455,46 @@ def build_engine(
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_gb * (1 << 30))
 
-    # Maximum optimization level (0-5, default is 3)
-    # Level 5 enables most aggressive kernel selection and fusion
-    config.builder_optimization_level = 5
-    print("  Optimization level: 5 (maximum)")
+    # Optimization level (0-5, default is 3)
+    # Higher levels enable more aggressive kernel selection/fusion but use more memory
+    config.builder_optimization_level = opt_level
+    print(f"  Optimization level: {opt_level}")
 
     profile = builder.create_optimization_profile()
     input_name = network.get_input(0).name
     profile.set_shape(
-        input_name, min=(1, 3, min_h, min_w), opt=(1, 3, opt_h, opt_w), max=(1, 3, max_h, max_w)
+        input_name,
+        min=(1, 3, min_h, min_w),
+        opt=(1, 3, opt_h, opt_w),
+        max=(1, 3, max_h, max_w),
     )
     config.add_optimization_profile(profile)
 
-    if fp16:
+    # Set compute precision
+    if precision in ("fp16", "bf16"):
         if builder.platform_has_fast_fp16:
             config.set_flag(trt.BuilderFlag.FP16)
-            print("  FP16 compute enabled")
         else:
-            print("  Warning: FP16 not supported on this platform")
+            print("  Warning: FP16/BF16 not supported on this platform, using FP32")
+            precision = "fp32"
+    if precision == "bf16":
+        if hasattr(trt.BuilderFlag, "BF16"):
+            config.set_flag(trt.BuilderFlag.BF16)
+        else:
+            print("  Warning: BF16 not supported by TensorRT, using FP16")
+            precision = "fp16"
 
-    # Set FP16 I/O tensors (halves GPU memory for buffers)
-    if fp16_io:
-        if not builder.platform_has_fast_fp16:
-            print("  Warning: FP16 I/O requested but FP16 not supported, using FP32")
-        else:
-            for i in range(network.num_inputs):
-                network.get_input(i).dtype = trt.float16
-            for i in range(network.num_outputs):
-                network.get_output(i).dtype = trt.float16
-            print(f"  FP16 I/O enabled (input/output tensors use half precision)")
+    # Set I/O tensor precision (matches compute precision)
+    dtype_map = _get_trt_dtype_map()
+    if precision not in dtype_map:
+        raise ValueError(f"Unknown precision: {precision}")
+    io_dtype = dtype_map[precision]
+
+    if io_dtype != trt.float32:
+        for i in range(network.num_inputs):
+            network.get_input(i).dtype = io_dtype
+        for i in range(network.num_outputs):
+            network.get_output(i).dtype = io_dtype
 
     print("  Building engine (this may take several minutes)...")
     serialized_engine = builder.build_serialized_network(network, config)
@@ -363,7 +504,9 @@ def build_engine(
     with open(engine_path, "wb") as f:
         f.write(serialized_engine)
 
-    print(f"  Engine saved: {engine_path} ({os.path.getsize(engine_path) / 1024 / 1024:.1f} MB)")
+    print(
+        f"  Engine saved: {engine_path} ({Path(engine_path).stat().st_size / 1024 / 1024:.1f} MB)"
+    )
 
     # Verify the built engine has correct I/O types
     runtime = trt.Runtime(logger)
@@ -373,15 +516,13 @@ def build_engine(
         name = engine.get_tensor_name(i)
         dtype = engine.get_tensor_dtype(name)
         mode = engine.get_tensor_mode(name)
-        dtype_str = "FP16" if dtype == trt.float16 else "FP32" if dtype == trt.float32 else str(dtype)
+        dtype_str = _trt_dtype_str(dtype)
         print(f"    {name}: {dtype_str} ({mode})")
-        if fp16_io and dtype != trt.float16:
-            print(f"  WARNING: {name} is {dtype_str} but FP16 I/O was requested!")
-    del engine
-    del runtime
+        if dtype != io_dtype:
+            print(f"  WARNING: {name} is {dtype_str} but {_trt_dtype_str(io_dtype)} was requested!")
 
 
-def height_to_shape(h, aspect=16 / 9):
+def height_to_shape(h: int, aspect: float = 16 / 9) -> tuple[int, int]:
     """Convert height to (width, height) assuming aspect ratio.
 
     Both width and height are aligned to 8 pixels, as required by many
@@ -396,7 +537,7 @@ def height_to_shape(h, aspect=16 / 9):
     return (w, h)
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Export AI upscaling models to TensorRT engines",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -409,37 +550,56 @@ def main():
         help="Model name (use --list to see available models)",
     )
     parser.add_argument("--list", "-l", action="store_true", help="List available models")
-    # Legacy alias for backwards compatibility
     parser.add_argument(
-        "--model-type",
+        "--min-height",
+        type=int,
+        default=None,
+        help="Minimum input height (default: auto)",
+    )
+    parser.add_argument(
+        "--opt-height",
+        type=int,
+        default=None,
+        help="Optimal input height (default: auto)",
+    )
+    parser.add_argument(
+        "--max-height",
+        type=int,
+        default=None,
+        help="Maximum input height (default: auto)",
+    )
+    parser.add_argument(
+        "--output",
+        "-o",
         type=str,
         default=None,
-        help=argparse.SUPPRESS,  # Hidden, use --model instead
+        help="Output engine path",
     )
     parser.add_argument(
-        "--min-height", type=int, default=None, help="Minimum input height (default: auto)"
+        "--precision",
+        "-p",
+        type=str,
+        default="fp16",
+        choices=["fp16", "bf16", "fp32"],
+        help="Model precision for compute and I/O tensors (default: fp16)",
     )
     parser.add_argument(
-        "--opt-height", type=int, default=None, help="Optimal input height (default: auto)"
+        "--workspace",
+        type=int,
+        default=8,
+        help="TensorRT workspace size in GB (default: 8)",
     )
     parser.add_argument(
-        "--max-height", type=int, default=None, help="Maximum input height (default: auto)"
+        "--opt-level",
+        type=int,
+        default=3,
+        choices=[0, 1, 2, 3, 4, 5],
+        help="TensorRT builder optimization level 0-5 (default: 3). Higher = more memory, potentially faster.",
     )
-    parser.add_argument("--output", "-o", type=str, default=None, help="Output engine path")
     parser.add_argument(
-        "--fp16", action="store_true", default=True, help="Enable FP16 compute precision (default: enabled)"
-    )
-    parser.add_argument("--fp32", action="store_true", help="Use FP32 compute precision instead of FP16")
-    parser.add_argument(
-        "--fp16-io", action="store_true", default=True, help="Use FP16 for I/O tensors (halves buffer memory, default: enabled)"
-    )
-    parser.add_argument("--fp32-io", action="store_true", help="Use FP32 for I/O tensors instead of FP16")
-    parser.add_argument(
-        "--workspace", type=int, default=8, help="TensorRT workspace size in GB (default: 8)"
-    )
-    parser.add_argument("--keep-onnx", action="store_true", help="Keep intermediate ONNX file")
-    parser.add_argument(
-        "--onnx-only", action="store_true", help="Only export ONNX, skip TensorRT engine build"
+        "--onnx-only",
+        action="store_true",
+        help="Only export ONNX, skip TensorRT engine build",
     )
     args = parser.parse_args()
 
@@ -447,22 +607,13 @@ def main():
         list_models()
         return
 
-    # Handle legacy --model-type argument
-    if args.model_type:
-        args.model = args.model_type
-
-    if args.fp32:
-        args.fp16 = False
-    if args.fp32_io:
-        args.fp16_io = False
-
     # Get model info for defaults
     try:
         model_name, info = resolve_model(args.model)
     except ValueError as e:
-        print(f"Error: {e}")
+        print(f"Error: {e}", file=sys.stderr)
         list_models()
-        return
+        sys.exit(1)
 
     scale = info["scale"]
 
@@ -470,25 +621,30 @@ def main():
     if scale == 2:
         # 2x: input 1080p -> output 4K
         default_min, default_opt, default_max = 720, 1080, 1080
-    else:
+    elif scale == 4:
         # 4x: input 720p -> output 4K, or 480p -> 1080p
         default_min, default_opt, default_max = 480, 720, 1080
+    else:
+        raise ValueError(f"Unsupported scale factor: {scale}")
 
     min_h = args.min_height or default_min
     opt_h = args.opt_height or default_opt
     max_h = args.max_height or default_max
-    min_h = min(min_h, max_h)
-    opt_h = min(max(opt_h, min_h), max_h)
+
+    # Validate height constraints
+    if min_h > max_h:
+        raise ValueError(f"--min-height ({min_h}) cannot be greater than --max-height ({max_h})")
+    if opt_h < min_h or opt_h > max_h:
+        raise ValueError(
+            f"--opt-height ({opt_h}) must be between --min-height ({min_h}) and --max-height ({max_h})"
+        )
 
     min_shape = height_to_shape(min_h)
     opt_shape = height_to_shape(opt_h)
     max_shape = height_to_shape(max_h)
 
     if args.output is None:
-        # Suffix indicates compute precision and I/O precision
-        compute_suffix = "fp16" if args.fp16 else "fp32"
-        io_suffix = "_io16" if args.fp16_io else ""
-        args.output = f"{model_name}_{opt_h}p_{compute_suffix}{io_suffix}.engine"
+        args.output = f"{model_name}_{opt_h}p_{args.precision}.engine"
 
     print("=" * 60)
     print("AI Upscale: TensorRT Engine Export")
@@ -497,19 +653,21 @@ def main():
     print(f"  {info['description']}")
     print()
 
-    model, existing_onnx, scale = get_model_and_onnx(args.model)
+    model, existing_onnx, _ = get_model_and_onnx(args.model)
 
     # Determine ONNX path
     if existing_onnx:
         # Model already has ONNX - use it directly
         onnx_path = existing_onnx
         cleanup_onnx = False
-    elif args.keep_onnx:
-        onnx_path = args.output.replace(".engine", ".onnx")
+    elif args.onnx_only:
+        # Save ONNX to current directory with sensible name
+        onnx_path = Path(f"{model_name}_{opt_h}p.onnx")
         cleanup_onnx = False
     else:
-        fd, onnx_path = tempfile.mkstemp(suffix=".onnx")
-        os.close(fd)
+        # Temp file for intermediate ONNX
+        with tempfile.NamedTemporaryFile(suffix=".onnx", delete=False) as tmp:
+            onnx_path = Path(tmp.name)
         cleanup_onnx = True
 
     try:
@@ -518,8 +676,8 @@ def main():
             export_onnx(model, opt_shape, onnx_path)
 
         if args.onnx_only:
-            print(f"\n  ONNX saved to: {onnx_path}")
-            print("  Skipping TensorRT build (--onnx-only). Build later with:")
+            print(f"\nONNX saved to: {onnx_path}")
+            print("Skipping TensorRT build (--onnx-only). Build later with:")
             print(f"  trtexec --onnx={onnx_path} --saveEngine={args.output} --fp16")
             return
 
@@ -529,13 +687,13 @@ def main():
             min_shape=min_shape,
             opt_shape=opt_shape,
             max_shape=max_shape,
-            fp16=args.fp16,
-            fp16_io=args.fp16_io,
+            precision=args.precision,
             workspace_gb=args.workspace,
+            opt_level=args.opt_level,
         )
     finally:
-        if cleanup_onnx and not args.onnx_only and os.path.exists(onnx_path):
-            os.remove(onnx_path)
+        if cleanup_onnx and (onnx_file := Path(onnx_path)).exists():
+            onnx_file.unlink()
 
     print()
     print("=" * 60)

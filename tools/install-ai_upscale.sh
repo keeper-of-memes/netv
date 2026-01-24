@@ -16,6 +16,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || {
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 MODEL_DIR="${MODEL_DIR:-$HOME/ffmpeg_build/models}"
 MODEL="${MODEL:-recommended}"
+PRECISION="${PRECISION:-fp16}"
 
 # Recursion guard to prevent fork bombs when calling ourselves
 MAX_RECURSION_DEPTH=10
@@ -59,6 +60,7 @@ if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
     echo "Environment:"
     echo "  MODEL_DIR   Output directory (default: \$HOME/ffmpeg_build/models)"
     echo "  MODEL       Model name (can also be passed as argument)"
+    echo "  PRECISION   Model precision: fp16, bf16, fp32 (default: fp16)"
     echo ""
     echo "Available models:"
     run_python "$EXPORT_SCRIPT" --list
@@ -163,7 +165,7 @@ echo ""
 # Use word splitting intentionally here (RESOLUTIONS is space-separated)
 # shellcheck disable=SC2086
 for res in $RESOLUTIONS; do
-    engine="$MODEL_DIR/${SAFE_MODEL}_${res}p_fp16.engine"
+    engine="$MODEL_DIR/${SAFE_MODEL}_${res}p_${PRECISION}.engine"
 
     if [ -f "$engine" ]; then
         echo "  ${res}p: already exists, skipping"
@@ -172,6 +174,7 @@ for res in $RESOLUTIONS; do
         # Capture output to show errors if build fails
         if ! OUTPUT=$(run_python "$EXPORT_SCRIPT" \
             --model "$MODEL" \
+            --precision "$PRECISION" \
             --min-height "$res" --opt-height "$res" --max-height "$res" \
             -o "$engine" 2>&1); then
             echo "ERROR building ${res}p engine:" >&2
@@ -211,5 +214,5 @@ echo ""
 echo "Test with:"
 echo "  ffmpeg -init_hw_device cuda=cu -filter_hw_device cu \\"
 echo "    -f lavfi -i testsrc=duration=3:size=1920x1080:rate=30 \\"
-echo "    -vf \"format=rgb24,hwupload,dnn_processing=dnn_backend=8:model=$MODEL_DIR/${SAFE_MODEL}_1080p_fp16.engine\" \\"
+echo "    -vf \"format=rgb24,hwupload,dnn_processing=dnn_backend=8:model=$MODEL_DIR/${SAFE_MODEL}_1080p_${PRECISION}.engine\" \\"
 echo "    -c:v hevc_nvenc test.mp4"
