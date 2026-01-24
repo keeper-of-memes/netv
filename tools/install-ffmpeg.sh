@@ -2,6 +2,27 @@
 # Build ffmpeg from source with hardware acceleration support
 # Supports: NVIDIA NVENC, AMD AMF, Intel QSV/VAAPI, LibTorch DNN, TensorRT DNN
 # https://trac.ffmpeg.org/wiki/CompilationGuide/Ubuntu
+#
+# Usage Examples:
+#
+#   # Default build (TensorRT enabled, requires compute_70+ GPU)
+#   ./install-ffmpeg.sh
+#
+#   # Maxwell GPU (compute_52, e.g. GTX 900/TITAN X) - use LibTorch 2.5 instead of TensorRT
+#   ENABLE_LIBTORCH=1 ENABLE_TENSORRT=0 LIBTORCH_VERSION=2.5.0 LIBTORCH_VARIANT=cu121 ./install-ffmpeg.sh
+#
+#   # CPU-only DNN inference (no GPU required)
+#   ENABLE_LIBTORCH=1 ENABLE_TENSORRT=0 LIBTORCH_VARIANT=cpu ./install-ffmpeg.sh
+#
+#   # Specific CUDA version
+#   CUDA_VERSION=12.4 ./install-ffmpeg.sh
+#
+#   # Skip dependency installation (already installed)
+#   SKIP_DEPS=1 ./install-ffmpeg.sh
+#
+#   # Both LibTorch and TensorRT (for testing/comparison)
+#   ENABLE_LIBTORCH=1 ENABLE_TENSORRT=1 ./install-ffmpeg.sh
+#
 set -e
 
 # =============================================================================
