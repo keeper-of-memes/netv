@@ -1,21 +1,17 @@
 /*
- * Copyright (c) 2024
+ * Copyright 2026 Joshua V. Dillon
  *
- * This file is part of FFmpeg.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * FFmpeg is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * FFmpeg is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with FFmpeg; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 /**
@@ -126,6 +122,9 @@ typedef CUresult (*fn_cuGraphExecDestroy)(CUgraphExec);
 
 // ============================================================================
 // Dynamic library loading for CUDA and TensorRT
+// NOTE: These handles are intentionally never dlclose'd. CUDA/TensorRT libraries
+// have complex cleanup requirements and calling dlclose can cause crashes.
+// The OS reclaims resources on process exit.
 // ============================================================================
 static void *libcuda_handle = NULL;
 static void *libnvinfer_handle = NULL;
@@ -1465,7 +1464,7 @@ static DNNModel *dnn_load_model_trt(DnnContext *ctx, DNNFunctionType func_type, 
         av_log(ctx, AV_LOG_DEBUG, "Set CUDA device %d for TensorRT\n", device_id);
     }
 
-    // Create TensorRT logger
+    // Create TensorRT logger (cleaned up by dnn_free_model_trt on any failure path)
     trt_model->logger = new TRTLogger(ctx);
 
     // Check engine cache first (avoid reloading same engine file)
@@ -1768,15 +1767,19 @@ static int dnn_execute_model_trt(const DNNModel *model, DNNExecBaseParams *exec_
 
     ret = ff_dnn_fill_task(task, exec_params, trt_model, 0, 1);
     if (ret != 0) {
-        av_freep(&task);
         av_log(ctx, AV_LOG_ERROR, "unable to fill task.\n");
+        av_frame_free(&task->in_frame);
+        av_frame_free(&task->out_frame);
+        av_freep(&task);
         return ret;
     }
 
     ret = ff_queue_push_back(trt_model->task_queue, task);
     if (ret < 0) {
-        av_freep(&task);
         av_log(ctx, AV_LOG_ERROR, "unable to push back task_queue.\n");
+        av_frame_free(&task->in_frame);
+        av_frame_free(&task->out_frame);
+        av_freep(&task);
         return ret;
     }
 
@@ -1785,6 +1788,8 @@ static int dnn_execute_model_trt(const DNNModel *model, DNNExecBaseParams *exec_
         av_log(ctx, AV_LOG_ERROR, "unable to extract last level task from task.\n");
         // Remove task from queue since extraction failed
         ff_queue_pop_back(trt_model->task_queue);
+        av_frame_free(&task->in_frame);
+        av_frame_free(&task->out_frame);
         av_freep(&task);
         return ret;
     }
@@ -1796,6 +1801,8 @@ static int dnn_execute_model_trt(const DNNModel *model, DNNExecBaseParams *exec_
         LastLevelTaskItem *lltask = (LastLevelTaskItem *)ff_queue_pop_back(trt_model->lltask_queue);
         av_freep(&lltask);
         ff_queue_pop_back(trt_model->task_queue);
+        av_frame_free(&task->in_frame);
+        av_frame_free(&task->out_frame);
         av_freep(&task);
         return AVERROR(EINVAL);
     }

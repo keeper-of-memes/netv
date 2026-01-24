@@ -1,21 +1,20 @@
 /*
- * Copyright (c) 2024
+ * Copyright 2026 Joshua V. Dillon
  *
- * This file is part of FFmpeg.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * FFmpeg is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * FFmpeg is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with FFmpeg; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ * Based on FFmpeg's dnn_backend_torch.cpp with extensive modifications
+ * for CUDA zero-copy support and hardware frame integration.
  */
 
 /**
@@ -248,6 +247,8 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
     input.dims[height_idx] = task->in_frame->height;
     input.dims[width_idx] = task->in_frame->width;
 
+    // Allocate tensors. Note: th_create_inference_request() NULL-initializes both pointers,
+    // so th_free_request() in the err path safely handles partial allocation if second new throws.
     try {
         infer_request->input_tensor = new torch::Tensor();
         infer_request->output = new torch::Tensor();
@@ -794,6 +795,9 @@ static DNNModel *dnn_load_model_th(DnnContext *ctx, DNNFunctionType func_type, A
         }
         // Load CUDA kernels - required for libtorch CUDA ops
         // Thread-safe initialization using call_once
+        // NOTE: These handles are intentionally never dlclose'd. CUDA/TensorRT libraries
+        // have complex cleanup requirements and calling dlclose can cause crashes.
+        // The OS reclaims resources on process exit.
         static std::once_flag cuda_lib_once;
         static void *cuda_lib_handle = NULL;
         std::call_once(cuda_lib_once, [ctx]() {
@@ -926,15 +930,19 @@ static int dnn_execute_model_th(const DNNModel *model, DNNExecBaseParams *exec_p
 
     ret = ff_dnn_fill_task(task, exec_params, th_model, 0, 1);
     if (ret != 0) {
-        av_freep(&task);
         av_log(ctx, AV_LOG_ERROR, "unable to fill task.\n");
+        av_frame_free(&task->in_frame);
+        av_frame_free(&task->out_frame);
+        av_freep(&task);
         return ret;
     }
 
     ret = ff_queue_push_back(th_model->task_queue, task);
     if (ret < 0) {
-        av_freep(&task);
         av_log(ctx, AV_LOG_ERROR, "unable to push back task_queue.\n");
+        av_frame_free(&task->in_frame);
+        av_frame_free(&task->out_frame);
+        av_freep(&task);
         return ret;
     }
 
@@ -942,6 +950,8 @@ static int dnn_execute_model_th(const DNNModel *model, DNNExecBaseParams *exec_p
     if (ret != 0) {
         av_log(ctx, AV_LOG_ERROR, "unable to extract last level task from task.\n");
         ff_queue_pop_back(th_model->task_queue);
+        av_frame_free(&task->in_frame);
+        av_frame_free(&task->out_frame);
         av_freep(&task);
         return ret;
     }
@@ -952,6 +962,8 @@ static int dnn_execute_model_th(const DNNModel *model, DNNExecBaseParams *exec_p
         LastLevelTaskItem *lltask = (LastLevelTaskItem *)ff_queue_pop_back(th_model->lltask_queue);
         av_freep(&lltask);
         ff_queue_pop_back(th_model->task_queue);
+        av_frame_free(&task->in_frame);
+        av_frame_free(&task->out_frame);
         av_freep(&task);
         return AVERROR(EINVAL);
     }

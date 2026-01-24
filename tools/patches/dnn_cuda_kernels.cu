@@ -1,13 +1,62 @@
 /*
- * Copyright (c) 2024
+ * Copyright 2026 Joshua V. Dillon
  *
- * This file is part of FFmpeg.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  *
  * CUDA kernels for DNN backend format conversion.
  * Compiled to PTX at build time, loaded dynamically at runtime.
  * No cudart dependency - uses CUDA Driver API via FFmpeg's dynlink.
  *
- * Supports FP32, FP16, and BF16 tensor formats.
+ * WHY CUSTOM CUDA KERNELS FOR SUCH A PRIMITIVE OPERATION?
+ * ========================================================
+ * These kernels convert FFmpeg frames (HWC uint8) to neural network input (NCHW float).
+ * This seems like it should be a one-liner, but no standard library handles our needs:
+ *
+ * What we need (all in one pass, zero-copy from FFmpeg CUDA frames):
+ *   1. Handle FFmpeg's linesize padding (row stride != width * channels)
+ *   2. Convert uint8 [0,255] to float [0,1] (type conversion + scaling)
+ *   3. Transpose HWC to NCHW (layout conversion)
+ *   4. Support multiple pixel formats (RGB24, BGR24, RGBA, BGRA, ARGB, etc.)
+ *   5. Support multiple tensor types (FP32, FP16, BF16)
+ *
+ * Why existing libraries don't work:
+ *   - cuDNN cudnnTransformTensor: float-to-float layout changes only, no uint8
+ *   - NPP (nppiConvert_8u32f): type conversion but no transpose, separate calls
+ *   - TensorRT IReformatLayer: layout changes for float, not uint8 ingestion
+ *   - Chaining these: multiple kernel launches + intermediate allocations
+ *
+ * Alternatives considered:
+ *   - Preprocessing in ONNX model: Can't handle variable linesize padding
+ *   - TensorRT custom plugin: Adds export complexity, less flexible
+ *   - NPP + cuBLAS transpose: 2 passes, intermediate buffer, slower
+ *
+ * The fused kernel approach: one read, one write, no intermediate buffers.
+ * It's unfortunate that we need 400 lines of CUDA for "pixels to floats",
+ * but this is the reality of bridging FFmpeg's frame formats to ML frameworks.
+ *
+ * MEMORY ACCESS PATTERN NOTES:
+ * ============================
+ * The HWC->NCHW conversion writes R,G,B to memory locations separated by H*W elements.
+ * This looks like poor cache behavior, but:
+ *   - Writes within each channel plane ARE coalesced (adjacent threads write adjacent addresses)
+ *   - Modern GPU L2 caches (4-6MB) can hold multiple planes for typical frame sizes
+ *   - The strided HWC reads (3 bytes apart) are actually the slower part
+ *   - Shared memory staging for better write coalescing was tested but didn't help
+ *
+ * An elementwise approach (3 separate kernels, one per channel) would:
+ *   - Triple kernel launch overhead
+ *   - Read the input 3x instead of 1x
+ *   - Not improve coalescing (still stride-3 reads)
  */
 
 #include <cuda_fp16.h>
@@ -89,7 +138,8 @@ __global__ void nchw_float32_to_hwc_uint8_kernel(
 }
 
 // Kernel: 4-channel HWC uint8 -> NCHW float32 (extract RGB, ignore alpha)
-// NOTE: r_offset, g_offset, b_offset must be validated by host (range [0,3])
+// NOTE: r_offset, g_offset, b_offset must be validated by host before launch (range [0,3]).
+// Device-side bounds checking would add branching overhead to every pixel - not worth it.
 __global__ void hwc4_uint8_to_nchw_float32_kernel(
     const unsigned char* __restrict__ input,
     float* __restrict__ output,
@@ -115,7 +165,8 @@ __global__ void hwc4_uint8_to_nchw_float32_kernel(
 }
 
 // Kernel: NCHW float32 -> 4-channel HWC uint8 (add alpha=255)
-// NOTE: r_offset, g_offset, b_offset, a_offset must be validated by host (range [0,3])
+// NOTE: r_offset, g_offset, b_offset, a_offset must be validated by host before launch (range [0,3]).
+// Device-side bounds checking would add branching overhead to every pixel - not worth it.
 __global__ void nchw_float32_to_hwc4_uint8_kernel(
     const float* __restrict__ input,
     unsigned char* __restrict__ output,
@@ -201,8 +252,9 @@ __global__ void nchw_float16_to_hwc_uint8_kernel(
     row[x * 3 + 2] = half_to_uint8_safe(b);
 }
 
-// Kernel: 4-channel HWC uint8 -> NCHW float16
-// NOTE: r_offset, g_offset, b_offset must be validated by host (range [0,3])
+// Kernel: 4-channel HWC uint8 -> NCHW float16 (extract RGB, ignore alpha)
+// NOTE: r_offset, g_offset, b_offset must be validated by host before launch (range [0,3]).
+// Device-side bounds checking would add branching overhead to every pixel - not worth it.
 __global__ void hwc4_uint8_to_nchw_float16_kernel(
     const unsigned char* __restrict__ input,
     __half* __restrict__ output,
@@ -227,8 +279,9 @@ __global__ void hwc4_uint8_to_nchw_float16_kernel(
     output[2 * hw + offset] = __float2half(b * kScale255Inv);
 }
 
-// Kernel: NCHW float16 -> 4-channel HWC uint8
-// NOTE: r_offset, g_offset, b_offset, a_offset must be validated by host (range [0,3])
+// Kernel: NCHW float16 -> 4-channel HWC uint8 (set alpha to 255)
+// NOTE: r_offset, g_offset, b_offset, a_offset must be validated by host before launch (range [0,3]).
+// Device-side bounds checking would add branching overhead to every pixel - not worth it.
 __global__ void nchw_float16_to_hwc4_uint8_kernel(
     const __half* __restrict__ input,
     unsigned char* __restrict__ output,
@@ -313,8 +366,9 @@ __global__ void nchw_bfloat16_to_hwc_uint8_kernel(
     row[x * 3 + 2] = bfloat16_to_uint8_safe(b);
 }
 
-// Kernel: 4-channel HWC uint8 -> NCHW bfloat16
-// NOTE: r_offset, g_offset, b_offset must be validated by host (range [0,3])
+// Kernel: 4-channel HWC uint8 -> NCHW bfloat16 (extract RGB, ignore alpha)
+// NOTE: r_offset, g_offset, b_offset must be validated by host before launch (range [0,3]).
+// Device-side bounds checking would add branching overhead to every pixel - not worth it.
 __global__ void hwc4_uint8_to_nchw_bfloat16_kernel(
     const unsigned char* __restrict__ input,
     __nv_bfloat16* __restrict__ output,
@@ -339,8 +393,9 @@ __global__ void hwc4_uint8_to_nchw_bfloat16_kernel(
     output[2 * hw + offset] = __float2bfloat16(b * kScale255Inv);
 }
 
-// Kernel: NCHW bfloat16 -> 4-channel HWC uint8
-// NOTE: r_offset, g_offset, b_offset, a_offset must be validated by host (range [0,3])
+// Kernel: NCHW bfloat16 -> 4-channel HWC uint8 (set alpha to 255)
+// NOTE: r_offset, g_offset, b_offset, a_offset must be validated by host before launch (range [0,3]).
+// Device-side bounds checking would add branching overhead to every pixel - not worth it.
 __global__ void nchw_bfloat16_to_hwc4_uint8_kernel(
     const __nv_bfloat16* __restrict__ input,
     unsigned char* __restrict__ output,

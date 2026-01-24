@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2019 Guo Yejun
+ * Copyright (c) 2026 Joshua V. Dillon (TensorRT/Torch backend integration, CUDA hw frame support)
  *
  * This file is part of FFmpeg.
  *
@@ -54,10 +55,10 @@ static const AVOption dnn_processing_options[] = {
     { "openvino",    "openvino backend flag",      0,                        AV_OPT_TYPE_CONST,     { .i64 = DNN_OV },    0, 0, FLAGS, .unit = "backend" },
 #endif
 #if (CONFIG_LIBTORCH == 1)
-    { "torch",       "torch backend flag",         0,                        AV_OPT_TYPE_CONST,     { .i64 = DNN_TH },    0, 0, FLAGS, "backend" },
+    { "torch",       "torch backend flag",         0,                        AV_OPT_TYPE_CONST,     { .i64 = DNN_TH },    0, 0, FLAGS, .unit = "backend" },
 #endif
 #if (CONFIG_LIBTENSORRT == 1)
-    { "tensorrt",    "tensorrt backend flag",      0,                        AV_OPT_TYPE_CONST,     { .i64 = DNN_TRT },   0, 0, FLAGS, "backend" },
+    { "tensorrt",    "tensorrt backend flag",      0,                        AV_OPT_TYPE_CONST,     { .i64 = DNN_TRT },   0, 0, FLAGS, .unit = "backend" },
 #endif
     { NULL }
 };
@@ -299,13 +300,19 @@ static int copy_uv_planes(DnnProcessingContext *ctx, AVFrame *out, const AVFrame
                                 bytewidth, uv_height);
         }
     } else if (in->format == AV_PIX_FMT_NV12) {
-        sws_scale(ctx->sws_uv_scale, (const uint8_t **)(in->data + 1), in->linesize + 1,
-                  0, ctx->sws_uv_height, out->data + 1, out->linesize + 1);
+        int ret = sws_scale(ctx->sws_uv_scale, (const uint8_t **)(in->data + 1), in->linesize + 1,
+                            0, ctx->sws_uv_height, out->data + 1, out->linesize + 1);
+        if (ret < 0)
+            return ret;
     } else {
-        sws_scale(ctx->sws_uv_scale, (const uint8_t **)(in->data + 1), in->linesize + 1,
-                  0, ctx->sws_uv_height, out->data + 1, out->linesize + 1);
-        sws_scale(ctx->sws_uv_scale, (const uint8_t **)(in->data + 2), in->linesize + 2,
-                  0, ctx->sws_uv_height, out->data + 2, out->linesize + 2);
+        int ret = sws_scale(ctx->sws_uv_scale, (const uint8_t **)(in->data + 1), in->linesize + 1,
+                            0, ctx->sws_uv_height, out->data + 1, out->linesize + 1);
+        if (ret < 0)
+            return ret;
+        ret = sws_scale(ctx->sws_uv_scale, (const uint8_t **)(in->data + 2), in->linesize + 2,
+                        0, ctx->sws_uv_height, out->data + 2, out->linesize + 2);
+        if (ret < 0)
+            return ret;
     }
 
     return 0;
@@ -395,6 +402,7 @@ static int activate(AVFilterContext *filter_ctx)
                 return ret;
             }
             if (ff_dnn_execute_model(&ctx->dnnctx, in, out) != 0) {
+                av_log(ctx, AV_LOG_ERROR, "DNN model execution failed\n");
                 av_frame_free(&in);
                 av_frame_free(&out);
                 return AVERROR(EIO);

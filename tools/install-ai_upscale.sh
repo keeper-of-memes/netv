@@ -137,21 +137,8 @@ if [ -n "$AVAILABLE_KB" ] && [ "$AVAILABLE_KB" -lt "$REQUIRED_SPACE_KB" ] 2>/dev
     echo "WARNING: Low disk space in $MODEL_DIR ($(( AVAILABLE_KB / 1024 ))MB available, recommend 2GB+)" >&2
 fi
 
-# Determine resolutions based on model scale
-case "$MODEL" in
-    2x-*)
-        # 2x models: 720p and 1080p input -> 1440p and 4K output
-        RESOLUTIONS="720 1080"
-        ;;
-    4x-*)
-        # 4x models: 480p, 720p, 1080p input -> 1080p, 4K, 4K output
-        RESOLUTIONS="480 720 1080"
-        ;;
-    *)
-        # Default to 2x resolutions
-        RESOLUTIONS="720 1080"
-        ;;
-esac
+# Input resolutions to build engines for (output can be downscaled as needed)
+RESOLUTIONS="480 720 1080"
 
 # Sanitize model name for safe filename (remove any path separators)
 # Done once before the loop since MODEL doesn't change during iteration
