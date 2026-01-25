@@ -182,6 +182,7 @@ The custom built ffmpeg is not required unless you:
 | Fraunhofer FDK AAC | ✅ | ❌ |
 | Nvidia TensorRT (AI Upscale) | ✅ | ❌ |
 | AV1 Vulkan | ✅ | ❌ |
+| Torch (Nvidia) | ⚠️ Optional | ❌ |
 
 For Nvidia, you will need the [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 
