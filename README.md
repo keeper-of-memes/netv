@@ -164,7 +164,7 @@ Open http://localhost:8000. To update: `docker compose pull && docker compose up
 
 We provide a custom built ffmpeg with Nvidia, AMD, and Intel _proprietary
 support_ for GPUs. Notably, essential packages are built from source and often
-_significantly_ newer than whats baked into Ubuntu.
+_significantly_ newer than what is baked into Ubuntu 2024 (LTS).
 
 The custom built ffmpeg is not required unless you want:
 - best possible GPU performance,
