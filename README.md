@@ -166,11 +166,11 @@ We provide a custom built ffmpeg with Nvidia, AMD, and Intel _proprietary
 support_ for GPUs. Notably, essential packages are built from source and often
 _significantly_ newer than whats baked into Ubuntu.
 
-The custom built ffmpeg is not required unless you:
-- want the best possible GPU performance,
-- bleeding edge builds,
-- have an AMD GPU,
-- want realtime AI upscaling (Nvidia only).
+The custom built ffmpeg is not required unless you want:
+- best possible GPU performance,
+- bleeding edge capability,
+- to use AMD discrete GPU,
+- realtime AI upscaling (Nvidia only).
 
 | | Custom ffmpeg | Ubuntu ffmpeg |
 |---|---|---|
