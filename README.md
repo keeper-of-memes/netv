@@ -181,7 +181,7 @@ The custom built ffmpeg is not required unless you:
 | NVENC (Nvidia nvcc optimized) | ✅ | ❌ |
 | AMD (GPU) AMF | ✅ | ❌ |
 | Fraunhofer FDK AAC | ✅ | ❌ |
-| TensorRT | ✅ | ❌ |
+| Nvidia TensorRT (AI Upscale) | ✅ | ❌ |
 | AV1 Vulkan | ✅ | ❌ |
 
 For Nvidia, you will need the [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
