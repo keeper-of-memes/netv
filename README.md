@@ -174,15 +174,15 @@ The custom built ffmpeg is not required unless you:
 
 | | Custom ffmpeg | Ubuntu ffmpeg |
 |---|---|---|
-| VAAPI (Intel/AMD) | ✅ | ✅ |
-| QSV (Intel QuickSync) | ✅ | ✅ |
-| Nvidia GPU (NVENC via LLVM) | ❌ | ✅ |
-| Nvidia GPU (NVENC via nvcc) | ✅ | ❌ |
-| AMD GPU (AMF) | ✅ | ❌ |
+| Intel or AMD Integrated GPU (VAAPI) | ✅ | ✅ |
+| Intel Integrated GPU (QSV QuickSync) | ✅ | ✅ |
+| Nvidia Discrete GPU (NVENC via LLVM) | ❌ | ✅ |
+| Nvidia Discrete GPU (NVENC via nvcc) | ✅ | ❌ |
+| AMD Discrete GPU (AMF) | ✅ | ❌ |
 | Fraunhofer FDK AAC | ✅ | ❌ |
-| Nvidia TensorRT (AI Upscale) | ✅ | ❌ |
+| AI Upscale (Nvidia TensorRT/Cuda) | ✅ | ❌ |
 | AV1 Vulkan | ✅ | ❌ |
-| Torch (Nvidia) | ⚠️ Optional | ❌ |
+| Torch (Nvidia Cuda) | ⚠️ Optional | ❌ |
 
 For Nvidia, you will need the [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 
