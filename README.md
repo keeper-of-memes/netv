@@ -172,9 +172,8 @@ The custom built ffmpeg is not required unless you:
 - have an AMD GPU,
 - want realtime AI upscaling (Nvidia only).
 
-| | Optimized (default) | Ubuntu Stock |
+| | Custom ffmpeg | Ubuntu ffmpeg |
 |---|---|---|
-| FFmpeg source | Pre-built with all codecs | apt (Ubuntu repos) |
 | VAAPI (Intel/AMD) | ✅ | ✅ |
 | QSV (Intel QuickSync) | ✅ | ✅ |
 | NVENC (LLVM) | ❌ | ✅ |
