@@ -172,6 +172,11 @@ The custom built ffmpeg is not required unless you want:
 - to use AMD discrete GPU,
 - realtime AI upscaling (Nvidia only).
 
+Note: the custom built ffmpeg will generally work even if a dependency is not
+available. In such cases the specific capability will not be available but
+other capabilities will still work. In this sense the custom built ffmpeg is a
+"kitchen sink" build.
+
 | | Custom ffmpeg | Ubuntu ffmpeg |
 |---|---|---|
 | Intel or AMD Integrated GPU (VAAPI) | ✅ | ✅ |
