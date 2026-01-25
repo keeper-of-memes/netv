@@ -180,7 +180,7 @@ The custom built ffmpeg is not required unless you:
 | Nvidia Discrete GPU (NVENC via nvcc) | ✅ | ❌ |
 | AMD Discrete GPU (AMF) | ✅ | ❌ |
 | Fraunhofer FDK AAC | ✅ | ❌ |
-| AI Upscale (Nvidia TensorRT/Cuda) | ✅ | ❌ |
+| Realtime AI Upscale (Nvidia TensorRT/Cuda) | ✅ | ❌ |
 | AV1 Vulkan | ✅ | ❌ |
 | Torch (Nvidia Cuda) | ⚠️ Optional | ❌ |
 
