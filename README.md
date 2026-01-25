@@ -69,7 +69,7 @@ content to pristine 4K at 85fps (RTX 5090). Perfect for older shows and low-bitr
 | ![Before](screenshots/ai-upscale_cleopatra_disabled.png) | ![After](screenshots/ai-upscale_cleopatra_enabled.png) |
 | ![Before](screenshots/ai-upscale_batman_disabled.png) | ![After](screenshots/ai-upscale_batman_enabled.png) |
 
-Requires NVIDIA GPU and the [AI Upscale Docker image](#ai-upscale-image-nvidia-gpu).
+Requires Nvidia GPU and the [AI Upscale Docker image](#ai-upscale-image-nvidia-gpu).
 The Settings page shows AI Upscale options when TensorRT engines are available.
 
 ## Alternatives
@@ -160,18 +160,29 @@ docker compose up -d
 
 Open http://localhost:8000. To update: `docker compose pull && docker compose up -d`
 
-#### Optional: Nonfree (proprietary) FFMPEG optimized for NVIDIA or AMD and/or Intel GPU
+#### Optional: Nonfree (proprietary) FFMPEG optimized for Nvidia or AMD and/or Intel GPU
 
-We provide a custom built ffmpeg with proprietary support for Nvidia, AMD, and Intel GPUs.
+We provide a custom built ffmpeg with Nvidia, AMD, and Intel _proprietary
+support_ for GPUs. Notably, essential packages are built from source and often
+_significantly_ newer than whats baked into Ubuntu.
+
+The custom built ffmpeg is not required unless you:
+- want the best possible GPU performance,
+- bleeding edge builds,
+- have an AMD GPU,
+- want realtime AI upscaling (Nvidia only).
 
 | | Optimized (default) | Ubuntu Stock |
 |---|---|---|
 | FFmpeg source | Pre-built with all codecs | apt (Ubuntu repos) |
-| NVENC (NVIDIA) | ✅ | ❌ |
 | VAAPI (Intel/AMD) | ✅ | ✅ |
-| QSV (Intel QuickSync) | ✅ | ❌ |
-| libfdk-aac | ✅ | ❌ |
-| SVT-AV1 | ✅ | ❌ |
+| QSV (Intel QuickSync) | ✅ | ✅ |
+| NVENC (LLVM) | ❌ | ✅ |
+| NVENC (Nvidia nvcc optimized) | ✅ | ❌ |
+| AMD (GPU) AMF | ✅ | ❌ |
+| Fraunhofer FDK AAC | ✅ | ❌ |
+| TensorRT | ✅ | ❌ |
+| AV1 Vulkan | ✅ | ❌ |
 
 For Nvidia, you will need the [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 
@@ -212,7 +223,7 @@ First start builds TensorRT engines for your GPU (~2-3 min). Engines are cached 
 `netv-models` volume for instant subsequent starts.
 
 Requirements:
-- NVIDIA GPU (RTX 20xx or newer recommended)
+- Nvidia GPU (RTX 20xx or newer recommended)
 - [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
 - Driver 535+ (CUDA 12.x)
 
@@ -248,10 +259,10 @@ For peak FFMPEG performance, Chromecast (requires HTTPS), and auto-start:
 # 2. (Optional) Get HTTPS certificates (required for Chromecast)
 ./tools/install-letsencrypt.sh yourdomain.com
 
-# 3. (Optional) Build FFmpeg (required for optimal NVidia encoding efficiency)
+# 3. (Optional) Build FFmpeg (required for optimal Nvidia encoding efficiency)
 ./tools/install-ffmpeg.sh
 
-# 4. (Optional) Build AI Upscale engines (requires NVIDIA GPU + TensorRT)
+# 4. (Optional) Build AI Upscale engines (requires Nvidia GPU + TensorRT)
 uv sync --group ai_upscale
 ./tools/install-ai_upscale.sh
 
@@ -382,8 +393,8 @@ And set up a cron job to refresh the guide daily (e.g.,
 Hardware transcoding is auto-detected. Check Settings to see available encoders.
 
 - **Intel/AMD (VAAPI)**: Works automatically if `/dev/dri` exists.
-- **NVIDIA**: Requires [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
-  See [NVIDIA GPU (NVENC)](#nvidia-gpu-nvenc) installation section for driver/compute compatibility table.
+- **Nvidia**: Requires [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+  See [Nvidia GPU (NVENC)](#nvidia-gpu-nvenc) installation section for driver/compute compatibility table.
 - **No GPU / VPS**: If `/dev/dri` doesn't exist, comment out the `devices` section
   in `docker-compose.yml` or compose will fail to start
 
@@ -392,11 +403,11 @@ Hardware transcoding is auto-detected. Check Settings to see available encoders.
 Tested on Ubuntu 24.04 LTS, 25.04, and 25.10.
 
 ```bash
-# Step 1: Remove existing NVIDIA packages
+# Step 1: Remove existing Nvidia packages
 sudo apt purge -y '^nv.*' '^libnv.*' '^cuda-.*' '^libcuda-.*' '^cudnn[0-9]*-.*' '^libcudnn[0-9]*-.*'
 sudo apt autoremove -y
 
-# Step 2: Add NVIDIA CUDA repository
+# Step 2: Add Nvidia CUDA repository
 wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
 sudo dpkg -i cuda-keyring_1.1-1_all.deb
 sudo apt modernize-sources || true
