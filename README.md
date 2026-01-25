@@ -176,9 +176,9 @@ The custom built ffmpeg is not required unless you:
 |---|---|---|
 | VAAPI (Intel/AMD) | ✅ | ✅ |
 | QSV (Intel QuickSync) | ✅ | ✅ |
-| NVENC (LLVM) | ❌ | ✅ |
-| NVENC (Nvidia nvcc optimized) | ✅ | ❌ |
-| AMD (GPU) AMF | ✅ | ❌ |
+| Nvidia GPU (NVENC via LLVM) | ❌ | ✅ |
+| Nvidia GPU (NVENC via nvcc) | ✅ | ❌ |
+| AMD GPU (AMF) | ✅ | ❌ |
 | Fraunhofer FDK AAC | ✅ | ❌ |
 | Nvidia TensorRT (AI Upscale) | ✅ | ❌ |
 | AV1 Vulkan | ✅ | ❌ |
