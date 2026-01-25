@@ -136,8 +136,6 @@ users who find them overkill and just want a simple IPTV player.
 
 ### Docker
 
-#### Pre-built Image (Easiest)
-
 Create a `docker-compose.yml`:
 
 ```yaml
@@ -162,11 +160,22 @@ docker compose up -d
 
 Open http://localhost:8000. To update: `docker compose pull && docker compose up -d`
 
-#### NVIDIA GPU (NVENC)
+#### Optional: Nonfree (proprietary) FFMPEG optimized for NVIDIA or AMD and/or Intel GPU
 
-Requires [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+We provide a custom built ffmpeg with proprietary support for Nvidia, AMD, and Intel GPUs.
 
-Check your driver and compute capability:
+| | Optimized (default) | Ubuntu Stock |
+|---|---|---|
+| FFmpeg source | Pre-built with all codecs | apt (Ubuntu repos) |
+| NVENC (NVIDIA) | ✅ | ❌ |
+| VAAPI (Intel/AMD) | ✅ | ✅ |
+| QSV (Intel QuickSync) | ✅ | ❌ |
+| libfdk-aac | ✅ | ❌ |
+| SVT-AV1 | ✅ | ❌ |
+
+For Nvidia, you will need the [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+
+To determine which ffmpeg build for Cuda, check your driver and compute capability:
 ```bash
 nvidia-smi --query-gpu=driver_version,compute_cap --format=csv,noheader
 # Example: 580.87.02, 8.6 → Driver 580, compute ≥7.5 → use cuda13.0
@@ -186,9 +195,11 @@ Then run:
 FFMPEG_IMAGE=ghcr.io/jvdillon/netv-ffmpeg:<cuda-version> docker compose --profile nvidia up -d
 ```
 
-#### AI Upscale Image (NVIDIA GPU)
+For AMD or Intel, it does not matter which version you choose nor do you need Cuda installed.
 
-For real-time 4x AI upscaling (720p → 4K at 85fps on RTX 5090):
+#### Optional: AI Upscaling (Nvidia GPU only)
+
+For real-time 2x or 4x AI upscaling (4x: 720p → 4K at ~39fps or 480p → 4K at ~85fps on RTX 5090):
 
 ```bash
 git clone https://github.com/jvdillon/netv.git
@@ -205,7 +216,7 @@ Requirements:
 - [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
 - Driver 535+ (CUDA 12.x)
 
-#### Build from Source
+#### Docker Custom Builds
 
 For customization or development:
 
@@ -218,15 +229,6 @@ docker compose up -d
 ```
 
 To update: `git pull && docker compose build && docker compose up -d`
-
-| | Optimized (default) | Ubuntu Stock |
-|---|---|---|
-| FFmpeg source | Pre-built with all codecs | apt (Ubuntu repos) |
-| NVENC (NVIDIA) | ✅ | ❌ |
-| VAAPI (Intel/AMD) | ✅ | ✅ |
-| QSV (Intel QuickSync) | ✅ | ❌ |
-| libfdk-aac | ✅ | ❌ |
-| SVT-AV1 | ✅ | ❌ |
 
 #### Options
 
@@ -267,11 +269,6 @@ sudo systemctl edit netv --full  # Change port or other settings
 sudo ./tools/uninstall-netv.sh   # Uninstall
 ```
 
-There's also some gems in `tools/`:
-- `zap2xml.py`: Scrape guide data into XML (I `crontab` this at 5am daily).
-- `alignm3u.py`: Useful for reworking your HDHomeRun m3u to align with guide.
-- `xtream2m3u.py`: Dump xtream to m3u, useful for making Emby work with IPTV.
-
 ### Development/Testing
 
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/):
@@ -290,6 +287,13 @@ pip install .
 ```
 
 Open http://localhost:8000, create an admin account, and add your IPTV source.
+
+### Additional Gems
+
+There's also some useful applications in `tools/`:
+- `zap2xml.py`: Scrape guide data into XML (I `crontab` this at 5am daily).
+- `alignm3u.py`: Useful for reworking your HDHomeRun m3u to align with guide.
+- `xtream2m3u.py`: Dump xtream to m3u, useful for making Emby work with IPTV.
 
 ## Troubleshooting
 
