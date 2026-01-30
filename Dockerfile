@@ -13,6 +13,7 @@
 # - All major codecs (x264, x265, VP9, AV1, etc.)
 
 ARG FFMPEG_IMAGE=ghcr.io/jvdillon/netv-ffmpeg:cuda12.4
+FROM ${FFMPEG_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive
 
